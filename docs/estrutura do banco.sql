@@ -1,0 +1,130 @@
+-- WARNING: This schema is for context only and is not meant to be run.
+-- Table order and constraints may not be valid for execution.
+
+CREATE TABLE public.categoria (
+  codgrupoprod bigint NOT NULL,
+  descr_grupo text NOT NULL,
+  codgrupopai bigint,
+  CONSTRAINT categoria_pkey PRIMARY KEY (codgrupoprod),
+  CONSTRAINT categoria_codgrupopai_fkey FOREIGN KEY (codgrupopai) REFERENCES public.categoria(codgrupoprod)
+);
+CREATE TABLE public.cliente (
+  id uuid NOT NULL,
+  codparc bigint UNIQUE,
+  nome text,
+  cpf_cnpj text UNIQUE,
+  email text UNIQUE,
+  telefone text,
+  is_admin boolean NOT NULL DEFAULT false,
+  CONSTRAINT cliente_pkey PRIMARY KEY (id),
+  CONSTRAINT cliente_id_fkey FOREIGN KEY (id) REFERENCES auth.users(id)
+);
+CREATE TABLE public.endereco (
+  id bigint GENERATED ALWAYS AS IDENTITY NOT NULL,
+  cliente_id uuid,
+  tipo text DEFAULT 'Entrega'::text,
+  cep text,
+  logradouro text,
+  numero text,
+  complemento text,
+  bairro text,
+  cidade text,
+  uf character varying,
+  is_padrao boolean NOT NULL DEFAULT false,
+  CONSTRAINT endereco_pkey PRIMARY KEY (id),
+  CONSTRAINT endereco_cliente_id_fkey FOREIGN KEY (cliente_id) REFERENCES public.cliente(id)
+);
+CREATE TABLE public.especificacao (
+  id_espec bigint GENERATED ALWAYS AS IDENTITY NOT NULL,
+  codprod bigint,
+  label text NOT NULL,
+  valor text NOT NULL,
+  CONSTRAINT especificacao_pkey PRIMARY KEY (id_espec),
+  CONSTRAINT especificacao_codprod_fkey FOREIGN KEY (codprod) REFERENCES public.produto(codprod)
+);
+CREATE TABLE public.estoque (
+  codprod bigint NOT NULL,
+  estoque_real numeric DEFAULT 0,
+  proporcao numeric DEFAULT 1.00,
+  estoque_disponivel numeric DEFAULT (estoque_real * proporcao),
+  dt_atualizacao timestamp with time zone DEFAULT now(),
+  CONSTRAINT estoque_pkey PRIMARY KEY (codprod),
+  CONSTRAINT estoque_codprod_fkey FOREIGN KEY (codprod) REFERENCES public.produto(codprod)
+);
+CREATE TABLE public.log_integracao_pedido (
+  id bigint GENERATED ALWAYS AS IDENTITY NOT NULL,
+  pedido_id bigint,
+  tentativa integer DEFAULT 1,
+  status text NOT NULL,
+  payload_enviado jsonb,
+  resposta_recebida jsonb,
+  criado_em timestamp with time zone DEFAULT now(),
+  CONSTRAINT log_integracao_pedido_pkey PRIMARY KEY (id),
+  CONSTRAINT log_integracao_pedido_pedido_id_fkey FOREIGN KEY (pedido_id) REFERENCES public.pedido(id)
+);
+CREATE TABLE public.log_sincronizacao (
+  id bigint GENERATED ALWAYS AS IDENTITY NOT NULL,
+  entidade text NOT NULL,
+  status text NOT NULL,
+  registros_processados integer DEFAULT 0,
+  mensagem_erro text,
+  iniciado_em timestamp with time zone DEFAULT now(),
+  finalizado_em timestamp with time zone,
+  CONSTRAINT log_sincronizacao_pkey PRIMARY KEY (id)
+);
+CREATE TABLE public.pedido (
+  id bigint GENERATED ALWAYS AS IDENTITY NOT NULL,
+  nunota bigint,
+  cliente_id uuid,
+  status text DEFAULT 'pendente'::text,
+  vlr_total numeric DEFAULT 0,
+  vlr_frete numeric DEFAULT 0,
+  peso_total numeric,
+  dt_pedido timestamp with time zone DEFAULT now(),
+  metodo_pagamento text,
+  log_erro_integracao text,
+  CONSTRAINT pedido_pkey PRIMARY KEY (id),
+  CONSTRAINT pedido_cliente_id_fkey FOREIGN KEY (cliente_id) REFERENCES public.cliente(id)
+);
+CREATE TABLE public.pedido_item (
+  id bigint GENERATED ALWAYS AS IDENTITY NOT NULL,
+  pedido_id bigint,
+  codprod bigint,
+  quantidade numeric NOT NULL,
+  vlr_unitario numeric NOT NULL,
+  CONSTRAINT pedido_item_pkey PRIMARY KEY (id),
+  CONSTRAINT pedido_item_pedido_id_fkey FOREIGN KEY (pedido_id) REFERENCES public.pedido(id),
+  CONSTRAINT pedido_item_codprod_fkey FOREIGN KEY (codprod) REFERENCES public.produto(codprod)
+);
+CREATE TABLE public.preco (
+  id bigint GENERATED ALWAYS AS IDENTITY NOT NULL,
+  codprod bigint,
+  vlr_venda numeric NOT NULL,
+  codtab bigint NOT NULL,
+  dtalter timestamp with time zone DEFAULT now(),
+  CONSTRAINT preco_pkey PRIMARY KEY (id),
+  CONSTRAINT preco_codprod_fkey FOREIGN KEY (codprod) REFERENCES public.produto(codprod)
+);
+CREATE TABLE public.produto (
+  codprod bigint NOT NULL,
+  descrprod text NOT NULL,
+  comnome text,
+  desccurta text,
+  descrprodoed text,
+  syncsite text DEFAULT 'N'::text,
+  codgrupoprod bigint,
+  peso numeric,
+  altura numeric,
+  largura numeric,
+  comprimento numeric,
+  CONSTRAINT produto_pkey PRIMARY KEY (codprod),
+  CONSTRAINT produto_codgrupoprod_fkey FOREIGN KEY (codgrupoprod) REFERENCES public.categoria(codgrupoprod)
+);
+CREATE TABLE public.produto_imagem (
+  id bigint GENERATED ALWAYS AS IDENTITY NOT NULL,
+  codprod bigint,
+  url text NOT NULL,
+  ordem integer DEFAULT 0,
+  CONSTRAINT produto_imagem_pkey PRIMARY KEY (id),
+  CONSTRAINT produto_imagem_codprod_fkey FOREIGN KEY (codprod) REFERENCES public.produto(codprod)
+);
