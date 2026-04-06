@@ -1,0 +1,11 @@
+# Supabase project configuration
+# Ref: https://supabase.com/docs/guides/cli/config
+
+[project]
+project_id = "dafsaudqocbznvvvtojy"
+
+[functions.sync-produtos]
+verify_jwt = false   # chamada pelo pg_cron (sem JWT de usuário)
+
+[functions.test-sankhya-auth]
+verify_jwt = true    # diagnóstico manual — requer token de serviço
