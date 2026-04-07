@@ -18,10 +18,10 @@ O sistema mantém o catálogo do e-commerce sincronizado com o Sankhya e orquest
                        └──────────────────────┘
 ```
 
-### Fluxo de Entrada (Sankhya → Supabase)
-Sincronização periódica via **pg_cron** + **Edge Functions**: produtos, estoque, preços e categorias são mantidos atualizados no Supabase.
+### Fluxo de Entrada (Sankhya → Supabase) — via pg_cron + Edge Functions
+Produtos, categorias, estoque e preços são sincronizados periodicamente do Sankhya para o Supabase. **As Edge Functions são estritamente leitura no Sankhya — nenhum dado é escrito de volta ao ERP.**
 
-### Fluxo de Saída (E-commerce → Supabase → Sankhya)
+### Fluxo de Saída (E-commerce → Supabase → Sankhya) — planejado
 Pedidos criados no React são persistidos no Supabase e enviados ao Sankhya via Edge Function, que retorna o `nunota` para faturamento.
 
 ---
@@ -31,11 +31,11 @@ Pedidos criados no React são persistidos no Supabase e enviados ao Sankhya via 
 | Camada | Tecnologia |
 |---|---|
 | Frontend | React |
-| Backend / Banco | Supabase (PostgreSQL 17) — Plano Free |
+| Backend / Banco | Supabase (PostgreSQL 17) |
 | Autenticação | Supabase Auth + RLS |
 | Serverless | Supabase Edge Functions (TypeScript / Deno) |
-| Agendamento | pg_cron |
-| ERP | Sankhya (API REST OAuth 2.0) |
+| Agendamento | pg_cron + pg_net |
+| ERP | Sankhya (API OAuth 2.0 + JAPE loadRecords) |
 
 ---
 
@@ -49,39 +49,39 @@ Vendas         pedido, pedido_item
 Logs           log_sincronizacao, log_integracao_pedido
 ```
 
-Para o schema completo, consulte [`docs/estrutura do banco.sql`](docs/estrutura%20do%20banco.sql).
+Para o schema completo, consulte [`docs/DATABASE_SCHEMA.md`](docs/DATABASE_SCHEMA.md).
 Para o mapeamento de campos Sankhya ↔ Supabase, consulte [`docs/MAPPING.md`](docs/MAPPING.md).
 
 ---
 
 ## Edge Functions
 
-| Função | Trigger | Descrição |
-|---|---|---|
-| `sync-produtos` | pg_cron (1h) | Sincroniza produtos com `AD_SYNCSITE='S'` do Sankhya |
-| `test-sankhya-auth` | Manual | Valida conectividade e secrets com a API Sankhya |
-| `test-sankhya-query` | Manual | Diagnóstico de queries no Sankhya |
+| Função | verify_jwt | Trigger | Descrição |
+|---|---|---|---|
+| `sync-produtos` | false | pg_cron | Sincroniza produtos com `AD_SYNCSITE='S'` do Sankhya |
+| `sync-categorias` | false | pg_cron | Sincroniza grupos de produto (TGFGRU) com ordenação topológica |
+| `sync-estoque` | false | pg_cron | Sincroniza estoque real (TGFEST, CODEMP=1, CODLOCAL=109) |
+| `sync-precos` | false | pg_cron | Sincroniza preços da tabela 201 (TGFPRC) |
+| `test-sankhya-auth` | true | Manual | Valida conectividade e secrets com a API Sankhya |
+
+Todas as funções de sync registram execução em `log_sincronizacao`. O código-fonte está em `supabase/functions/`.
 
 ---
 
 ## Agendamento (pg_cron)
 
-| Job | Schedule | Descrição |
+| Job | Schedule | Edge Function |
 |---|---|---|
-| `sync-produtos-hourly` | `0 * * * *` | Sincronização de produtos a cada 1 hora |
+| `sync-produtos-hourly` | `0 * * * *` | `sync-produtos` — a cada 1 hora |
+| `sync-estoque-30min` | `*/30 * * * *` | `sync-estoque` — a cada 30 minutos |
+| `sync-precos-daily` | `0 1 * * *` | `sync-precos` — diariamente às 01:00 |
+| `sync-categorias-daily` | `0 3 * * *` | `sync-categorias` — diariamente às 03:00 |
 
 ---
 
-## Configuração
+## Secrets necessários
 
-### Pré-requisitos
-- Projeto Supabase ativo
-- Conta no Portal do Desenvolvedor Sankhya com aplicação cadastrada
-- Acesso ao Sankhya Om para obter o token de gateway
-
-### Secrets necessários
-
-Configure os seguintes secrets nas **Edge Function Secrets** do Supabase (nunca exponha esses valores no código ou no frontend):
+Configure os seguintes secrets nas **Edge Function Secrets** do Supabase (nunca exponha no código ou frontend):
 
 | Secret | Descrição |
 |---|---|
@@ -90,38 +90,23 @@ Configure os seguintes secrets nas **Edge Function Secrets** do Supabase (nunca 
 | `SANKHYA_CLIENT_SECRET` | Secret da aplicação |
 | `SANKHYA_X_TOKEN` | Token JWT obtido em *Configurações Gateway* no Sankhya Om |
 
-### Validando a integração
-
-Após configurar os secrets, execute a função de teste:
-
-```bash
-curl -X GET https://<PROJECT_REF>.supabase.co/functions/v1/test-sankhya-auth \
-  -H "Authorization: Bearer <SUPABASE_ANON_KEY>"
-```
-
-Resposta esperada:
-```json
-{
-  "success": true,
-  "message": "Autenticação Sankhya bem-sucedida.",
-  "report": {
-    "token_received": true,
-    "token_type": "Bearer",
-    "expires_in": 300
-  }
-}
-```
-
 ---
 
-## Sincronização de Produtos
+## Execução manual das Edge Functions
 
-### Execução manual
 ```bash
-curl -X POST https://<PROJECT_REF>.supabase.co/functions/v1/sync-produtos
+# Testar autenticação com o Sankhya
+curl -X GET https://dafsaudqocbznvvvtojy.supabase.co/functions/v1/test-sankhya-auth \
+  -H "Authorization: Bearer <SUPABASE_SERVICE_ROLE_KEY>"
+
+# Disparar sync manualmente (todas sem JWT)
+curl -X POST https://dafsaudqocbznvvvtojy.supabase.co/functions/v1/sync-produtos
+curl -X POST https://dafsaudqocbznvvvtojy.supabase.co/functions/v1/sync-categorias
+curl -X POST https://dafsaudqocbznvvvtojy.supabase.co/functions/v1/sync-estoque
+curl -X POST https://dafsaudqocbznvvvtojy.supabase.co/functions/v1/sync-precos
 ```
 
-### Resposta
+Resposta padrão de sucesso:
 ```json
 {
   "success": true,
@@ -129,12 +114,6 @@ curl -X POST https://<PROJECT_REF>.supabase.co/functions/v1/sync-produtos
   "registros_ignorados": 7
 }
 ```
-
-### Lógica incremental
-- Busca todos os produtos com `AD_SYNCSITE='S'` no Sankhya
-- Compara `DTALTER` do Sankhya com o `dtalter` armazenado no Supabase
-- Faz upsert apenas dos produtos novos ou modificados
-- Registra cada execução em `log_sincronizacao`
 
 ---
 
@@ -144,6 +123,7 @@ curl -X POST https://<PROJECT_REF>.supabase.co/functions/v1/sync-produtos
 - **Service Role Key** usada exclusivamente nas Edge Functions (nunca no frontend)
 - **Credentials** do Sankhya armazenadas nos Supabase Secrets (não no banco)
 - Frontend usa apenas a **anon key** pública
+- Edge Functions de sync usam `verify_jwt: false` pois são invocadas pelo `pg_net` via cron interno
 
 ---
 
@@ -151,8 +131,7 @@ curl -X POST https://<PROJECT_REF>.supabase.co/functions/v1/sync-produtos
 
 | Arquivo | Conteúdo |
 |---|---|
-| [`docs/PROJECT_OVERVIEW.md`](docs/PROJECT_OVERVIEW.md) | Arquitetura e objetivos do projeto |
-| [`docs/DATABASE_SCHEMA.md`](docs/DATABASE_SCHEMA.md) | Relacionamentos e regras do banco |
-| [`docs/MAPPING.md`](docs/MAPPING.md) | Mapeamento completo Sankhya ↔ Supabase |
-| [`docs/SANKHYA_INTEGRATION_SPECS.md`](docs/SANKHYA_INTEGRATION_SPECS.md) | Especificações da API Sankhya |
-| [`docs/estrutura do banco.sql`](docs/estrutura%20do%20banco.sql) | Schema SQL completo |
+| [`docs/PROJECT_OVERVIEW.md`](docs/PROJECT_OVERVIEW.md) | Arquitetura, objetivos e padrões do projeto |
+| [`docs/DATABASE_SCHEMA.md`](docs/DATABASE_SCHEMA.md) | Schema completo de todas as tabelas |
+| [`docs/MAPPING.md`](docs/MAPPING.md) | Mapeamento completo Sankhya ↔ Supabase por entidade |
+| [`docs/SANKHYA_INTEGRATION_SPECS.md`](docs/SANKHYA_INTEGRATION_SPECS.md) | Referências da API Sankhya e especificações de integração |

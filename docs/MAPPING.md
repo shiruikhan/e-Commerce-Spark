@@ -6,7 +6,8 @@
 |---|---|
 | `→` | Campo Sankhya mapeado para campo Supabase |
 | `(filtro)` | Campo usado como condição de filtro, não armazenado |
-| `(gerado)` | Campo calculado ou gerado automaticamente |
+| `(gerado)` | Campo calculado ou gerado automaticamente pelo banco |
+| `(manual)` | Campo gerenciado manualmente no Supabase, não sobrescrito pelo sync |
 
 ---
 
@@ -26,7 +27,7 @@
 | Parâmetro | Secret | Descrição |
 |---|---|---|
 | `client_id` | `SANKHYA_CLIENT_ID` | ID da aplicação no Portal do Desenvolvedor |
-| `client_secret` | `SANKHYA_CLIENT_SECRET` | Secret da aplicação no Portal do Desenvolvedor |
+| `client_secret` | `SANKHYA_CLIENT_SECRET` | Secret da aplicação |
 | `grant_type` | — | Literal `client_credentials` |
 
 ### Resposta
@@ -43,6 +44,8 @@
 
 ## 2. Endpoint de Consulta Genérica (loadRecords)
 
+Usado por `sync-categorias`, `sync-estoque`, `sync-precos` e `sync-produtos`.
+
 - **URL:** `{BASE}/gateway/v1/mge/service.sbr?serviceName=CRUDServiceProvider.loadRecords&outputType=json`
 - **Método:** `POST`
 - **Authorization:** `Bearer {access_token}`
@@ -58,7 +61,7 @@
       "offsetPage": "0",
       "criteria": {
         "expression": { "$": "CAMPO = ?" },
-        "parameter": [{ "$": "valor", "type": "S" }]
+        "parameter": [{ "$": "valor", "type": "I" }]
       },
       "entity": [{
         "path": "",
@@ -116,97 +119,111 @@
 
 ## 3. Entidade: Produto
 
+### Tabela Sankhya: `TGFPRO` | rootEntity: `Produto`
 ### Tabela Supabase: `public.produto`
+### Edge Function: `sync-produtos` | Cron: `0 * * * *` (todo hora)
 
 | Campo Sankhya | Campo Supabase | Tipo | Observação |
 |---|---|---|---|
 | `CODPROD` | `codprod` | `bigint` | Chave primária |
 | `DESCRPROD` | `descrprod` | `text` | Nome técnico do produto |
-| `AD_COMNOME` | `comnome` | `text` | Nome comercial (campo adicional) |
-| `AD_DESCCURTA` | `desccurta` | `text` | Descrição curta para e-commerce (campo adicional) |
-| `AD_DESCRPRODOED` | `descrprodoed` | `text` | Descrição longa para e-commerce (campo adicional) |
+| `AD_COMNOME` | `comnome` | `text` | Nome comercial |
+| `AD_DESCCURTA` | `desccurta` | `text` | Descrição curta para e-commerce |
+| `AD_DESCRPRODOED` | `descrprodoed` | `text` | Descrição longa para e-commerce |
 | `DTALTER` | `dtalter` | `timestamptz` | Data da última alteração — controle incremental |
 | `PESOBRUTO` | `peso` | `numeric` | Peso bruto em kg |
 | `ALTURA` | `altura` | `numeric` | Altura em cm |
 | `LARGURA` | `largura` | `numeric` | Largura em cm |
-| `ESPESSURA` | `comprimento` | `numeric` | Espessura/profundidade em cm |
+| `ESPESSURA` | `comprimento` | `numeric` | Comprimento/profundidade em cm |
 | `AD_SYNCSITE` | — | — | `(filtro)` — só sincroniza se `= 'S'` |
-| `CODGRUPOPROD` | `codgrupoprod` | `bigint` | FK para `categoria` — sincronizado separadamente |
+| `CODGRUPOPROD` | `codgrupoprod` | `bigint` | FK para `categoria` |
 
-### Lógica de sincronização incremental
-1. Busca **todos** os produtos com `AD_SYNCSITE='S'` no Sankhya (sem filtro de data na query)
-2. Carrega snapshot do Supabase: `codprod, dtalter, peso, altura, largura, comprimento`
-3. Para cada produto retornado pelo Sankhya, faz upsert se **qualquer** critério for verdadeiro:
-   - **Critério 1 — Produto novo:** `codprod` não existe no Supabase
-   - **Critério 2 — Modificado no ERP:** `DTALTER` do Sankhya é mais recente que o `dtalter` do Supabase
-   - **Critério 3 — Campo novo no sync:** algum campo mapeado está `null` no Supabase mas tem valor no Sankhya (garante que adições futuras de campos ao sincronizador preencham registros existentes sem re-sync manual)
-4. Registra resultado em `log_sincronizacao`
+### Lógica incremental
+1. Busca todos os produtos com `AD_SYNCSITE='S'` (sem filtro de data na query)
+2. Snapshot do Supabase: `codprod, dtalter, peso, altura, largura, comprimento`
+3. Upsert se qualquer critério for verdadeiro:
+   - Produto novo (codprod não existe no Supabase)
+   - `DTALTER` do Sankhya mais recente que `dtalter` do Supabase
+   - Algum campo mapeado está `null` no Supabase mas tem valor no Sankhya
 
 > **Por que não filtrar por DTALTER no Sankhya?**
-> Quando `AD_SYNCSITE` muda de `'N'` para `'S'`, o `DTALTER` do produto pode não ser atualizado.
-> Filtrar no Sankhya faria com que esses produtos fossem ignorados na sincronização.
-
-### Agendamento
-- **Cron:** `0 * * * *` — toda hora no minuto 0
-- **Edge Function:** `sync-produtos`
+> Quando `AD_SYNCSITE` muda de `'N'` para `'S'`, o `DTALTER` do produto pode não ser atualizado. Filtrar no Sankhya faria com que esses produtos fossem ignorados.
 
 ---
 
-## 4. Entidade: Estoque *(planejado)*
+## 4. Entidade: Categoria
 
-### Tabela Supabase: `public.estoque`
-
-| Campo Sankhya | Campo Supabase | Tipo | Observação |
-|---|---|---|---|
-| `CODPROD` | `codprod` | `bigint` | FK para `produto` |
-| `ESTOQUE` (a confirmar) | `estoque_real` | `numeric` | Saldo real do estoque |
-| — | `proporcao` | `numeric` | Fator de conversão de unidade (configurado no Supabase) |
-| — | `estoque_disponivel` | `numeric` | `(gerado)` = `estoque_real * proporcao` |
-| — | `dt_atualizacao` | `timestamptz` | `(gerado)` = `now()` |
-
-**Endpoint Sankhya:** `GET /v1/estoque`
-
----
-
-## 5. Entidade: Preço *(planejado)*
-
-### Tabela Supabase: `public.preco`
-
-| Campo Sankhya | Campo Supabase | Tipo | Observação |
-|---|---|---|---|
-| `CODPROD` | `codprod` | `bigint` | FK para `produto` |
-| `VLRVENDA` (a confirmar) | `vlr_venda` | `numeric` | Preço de venda |
-| `CODTAB` | `codtab` | `bigint` | Código da tabela de preço |
-| — | `dtalter` | `timestamptz` | `(gerado)` = `now()` |
-
-**Endpoint Sankhya:** `GET /v1/precos`
-
----
-
-## 6. Entidade: Categoria
-
-### Entidade Sankhya: `GrupoProduto` (tabela `TGFGRU`)
-
+### Tabela Sankhya: `TGFGRU` | rootEntity: `GrupoProduto`
 ### Tabela Supabase: `public.categoria`
+### Edge Function: `sync-categorias` | Cron: `0 3 * * *` (diário às 03h)
 
 | Campo Sankhya | Campo Supabase | Tipo | Observação |
 |---|---|---|---|
 | `CODGRUPOPROD` | `codgrupoprod` | `bigint` | Chave primária |
 | `DESCRGRUPOPROD` | `descr_grupo` | `text` | Descrição do grupo |
-| `CODGRUPAI` | `codgrupopai` | `bigint` | FK self-referencing para grupo pai. `CODGRUPAI = 0` no Sankhya → `null` no Supabase (categoria raiz) |
+| `CODGRUPAI` | `codgrupopai` | `bigint` | FK self-referencing. `CODGRUPAI ≤ 0` no Sankhya → `null` (raiz) |
 
-### Lógica de sincronização incremental
-1. Busca **todos** os grupos de produto no Sankhya (sem filtro — não há flag equivalente ao `AD_SYNCSITE`)
-2. Carrega snapshot do Supabase: `codgrupoprod, descr_grupo, codgrupopai`
-3. Para cada categoria retornada, faz upsert se **qualquer** critério for verdadeiro:
-   - **Critério 1 — Categoria nova:** `codgrupoprod` não existe no Supabase
-   - **Critério 2 — Descrição alterada:** `descr_grupo` difere entre Sankhya e Supabase
-   - **Critério 3 — Hierarquia alterada:** `codgrupopai` difere (reestruturação de grupos)
-4. Registra resultado em `log_sincronizacao`
+### Lógica incremental
+1. Busca todos os grupos sem filtro (não há equivalente ao `AD_SYNCSITE`)
+2. Snapshot do Supabase: `codgrupoprod, descr_grupo, codgrupopai`
+3. Upsert se: categoria nova, `descr_grupo` alterada, ou `codgrupopai` alterado
+4. **Ordenação topológica:** upsert em batches (pais antes de filhos) para respeitar a FK self-referencing
+5. Categorias órfãs (pai não encontrado) são salvas com `codgrupopai = null`
 
-### Agendamento
-- **Cron:** `0 3 * * *` — diariamente às 03:00 (categorias mudam com menos frequência que produtos)
-- **Edge Function:** `sync-categorias`
+> **Atenção:** O campo no Sankhya se chama `CODGRUPAI` (não `CODGRUPOPAI`). Valores `0` ou negativos (ex: `-999999999`) indicam categoria raiz.
+
+---
+
+## 5. Entidade: Estoque
+
+### Tabela Sankhya: `TGFEST` | rootEntity: `Estoque`
+### Tabela Supabase: `public.estoque`
+### Edge Function: `sync-estoque` | Cron: `*/30 * * * *` (a cada 30 min)
+
+| Campo Sankhya | Campo Supabase | Tipo | Observação |
+|---|---|---|---|
+| `CODPROD` | `codprod` | `bigint` | PK / FK para `produto` |
+| `ESTOQUE` | `estoque_real` | `numeric` | Saldo real do estoque |
+| — | `proporcao` | `numeric` | `(manual)` Fator de conversão — nunca sobrescrito pelo sync |
+| — | `estoque_disponivel` | `numeric` | `(gerado)` = `estoque_real * proporcao` — nunca incluir no upsert |
+| — | `dt_atualizacao` | `timestamptz` | `(gerado)` = `now()` |
+
+### Filtros da query
+- `CODEMP = 1` (empresa)
+- `CODLOCAL = 109` (local de estoque)
+
+### Lógica de zero-stock
+O Sankhya **remove** a linha da TGFEST quando o estoque chega a zero. Para detectar isso:
+1. Coleta todas as páginas do Sankhya
+2. Compara com snapshot do Supabase
+3. Produtos no Supabase com `estoque_real > 0` que **sumiram** da TGFEST → zerados (`estoque_real = 0`)
+
+> **Atenção:** `estoque_disponivel` é `GENERATED ALWAYS AS` no PostgreSQL. Nunca incluir no payload do upsert — causará erro.
+
+---
+
+## 6. Entidade: Preço
+
+### Tabela Sankhya: `TGFPRC` | rootEntity: `PrecoProduto`
+### Tabela Supabase: `public.preco`
+### Edge Function: `sync-precos` | Cron: `0 1 * * *` (diário às 01h)
+
+| Campo Sankhya | Campo Supabase | Tipo | Observação |
+|---|---|---|---|
+| `CODPROD` | `codprod` | `bigint` | FK para `produto` |
+| `VLRVENDA` | `vlr_venda` | `numeric` | Preço de venda |
+| `CODTAB` | `codtab` | `bigint` | Código da tabela (201 = e-commerce) |
+| — | `dtalter` | `timestamptz` | Timestamp da atualização pelo sync |
+
+### Filtros da query
+- `CODTAB = 201`
+- Apenas produtos presentes na tabela `produto` (com `AD_SYNCSITE='S'`)
+
+### Lógica incremental
+- Upsert com `onConflict: 'codprod,codtab'`
+- Atualiza apenas se `vlr_venda` mudou ou produto é novo
+
+> **Nota técnica:** A REST API `/v1/precos/tabela/{codtab}` apresentou instabilidade (timeout). O sync usa `loadRecords` com `rootEntity: 'PrecoProduto'`, que é o padrão confiável para todas as entidades.
 
 ---
 
@@ -217,10 +234,10 @@
 | Campo Sankhya | Campo Supabase | Tipo | Observação |
 |---|---|---|---|
 | `CODPARC` | `codparc` | `bigint` | Chave única no Sankhya |
-| `NOMEPARC` (a confirmar) | `nome` | `text` | Nome do parceiro |
-| `CGC_CPF` (a confirmar) | `cpf_cnpj` | `text` | CPF ou CNPJ |
-| `EMAIL` (a confirmar) | `email` | `text` | E-mail |
-| `TELEFONE` (a confirmar) | `telefone` | `text` | Telefone |
+| `NOMEPARC` | `nome` | `text` | Nome do parceiro |
+| `CGC_CPF` | `cpf_cnpj` | `text` | CPF ou CNPJ |
+| `EMAIL` | `email` | `text` | E-mail |
+| `TELEFONE` | `telefone` | `text` | Telefone |
 | — | `id` | `uuid` | FK para `auth.users` — gerado no Supabase |
 
 **Endpoints Sankhya:** `POST /v1/clientes` (criar) · `PUT /v1/clientes` (atualizar)
@@ -229,7 +246,7 @@
 
 ## 8. Entidade: Pedido *(planejado)*
 
-### Tabela Supabase: `public.pedido` + `public.pedido_item`
+### Tabelas Supabase: `public.pedido` + `public.pedido_item`
 
 | Campo Supabase | Campo Sankhya | Observação |
 |---|---|---|
@@ -237,8 +254,8 @@
 | `pedido.nunota` | `NUNOTA` | Preenchido após integração com Sankhya |
 | `pedido.cliente_id` | — | UUID do cliente no Supabase |
 | `pedido_item.codprod` | `CODPROD` | FK para produto |
-| `pedido_item.quantidade` | `QTDNEG` (a confirmar) | Quantidade negociada |
-| `pedido_item.vlr_unitario` | `VLRUNIT` (a confirmar) | Valor unitário |
+| `pedido_item.quantidade` | `QTDNEG` | Quantidade negociada |
+| `pedido_item.vlr_unitario` | `VLRUNIT` | Valor unitário |
 
 **Endpoint Sankhya:** `loadRecords` na entidade `CabecalhoNota` (TGFCAB)
 

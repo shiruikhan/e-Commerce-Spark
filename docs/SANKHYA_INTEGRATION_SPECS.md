@@ -1,59 +1,111 @@
+# Especificações da API Sankhya
 
 ## 1. Referências Oficiais (Developer Portal)
 
-Documentação base para consulta de tipos de dados e parâmetros:
+- **Autenticação (OAuth):** https://developer.sankhya.com.br/reference/post_authenticate
+- **Clientes:** https://developer.sankhya.com.br/reference/getcliente
+- **Estoque:** https://developer.sankhya.com.br/reference/getestoqueporproduto
+- **Preços:** https://developer.sankhya.com.br/reference/getprecoprodutotabela
+- **Produtos:** https://developer.sankhya.com.br/reference/get_v1-produtos
+- **Consultas Genéricas (loadRecords):** https://developer.sankhya.com.br/reference/get_loadrecords
 
--   **Autenticação (OAuth):** [Post Authenticate](https://developer.sankhya.com.br/reference/post_authenticate)
-    
--   **Clientes:** [Get](https://developer.sankhya.com.br/reference/getcliente) | [Post](https://developer.sankhya.com.br/reference/postcliente) | [Put](https://developer.sankhya.com.br/reference/putcliente)
-    
--   **Estoque:** [Por Produto](https://developer.sankhya.com.br/reference/getestoqueporproduto) | [Lista Geral](https://developer.sankhya.com.br/reference/getestoqueprodutos)
-    
--   **Preços:** [Preço por Tabela](https://developer.sankhya.com.br/reference/getprecoprodutotabela)
-    
--   **Produtos:** [Catálogo V1](https://developer.sankhya.com.br/reference/get_v1-produtos)
-    
--   **Consultas Genéricas:** [Load Records](https://developer.sankhya.com.br/reference/get_loadrecords)
-    
+---
 
-## 2. Fluxo de Autenticação (OAuth)
+## 2. Autenticação — OAuth 2.0 Client Credentials
 
-Diferente do login por sessão anterior, utilizaremos o fluxo de **Client Credentials**.
+### Secrets configurados no Supabase
+| Secret | Descrição |
+|---|---|
+| `SANKHYA_AUTH_URL` | URL completa do endpoint de autenticação |
+| `SANKHYA_CLIENT_ID` | ID da aplicação no Portal do Desenvolvedor |
+| `SANKHYA_CLIENT_SECRET` | Secret da aplicação |
+| `SANKHYA_X_TOKEN` | Token JWT do gateway — obtido em *Configurações Gateway* no Sankhya Om |
 
-### Credenciais Necessárias (Disponíveis no Supabase Secrets)
+### Requisição de autenticação
+```
+POST {SANKHYA_AUTH_URL}
+Content-Type: application/x-www-form-urlencoded
+X-Token: {SANKHYA_X_TOKEN}
 
--   `SANKHYA_CLIENT_ID`
-    
--   `SANKHYA_CLIENT_SECRET`
-    
--   `SANKHYA_APP_KEY`
-    
--   `SANKHYA_AUTH_URL`
-    
+grant_type=client_credentials&client_id={SANKHYA_CLIENT_ID}&client_secret={SANKHYA_CLIENT_SECRET}
+```
 
-### Implementação do Handshake
+### Resposta
+```json
+{
+  "access_token": "<JWT>",
+  "token_type": "Bearer",
+  "expires_in": 300
+}
+```
 
-1.  A Edge Function deve disparar um `POST` para `SANKHYA_AUTH_URL`.
-    
-2.  O corpo da requisição deve conter o `client_id` e `client_secret`.
-    
-3.  O Header deve incluir o `appkey`.
-    
-4.  O `access_token` recebido deve ser armazenado temporariamente ou renovado a cada execução (respeitando o tempo de vida do token).
-    
+> Token expira em **300 segundos**. Obter um novo a cada execução — não armazenar em banco.
 
-## 3. Mapeamento de Endpoints por Entidade
+---
 
-Entidade	Método	Endpoint	Objetivo
-Auth	POST	/authenticate	Obter token de acesso OAuth
-Cliente	POST/PUT	/v1/clientes	Sincronizar cadastros do E-commerce
-Estoque	GET	/v1/estoque	Atualizar saldo no Supabase
-Preço	GET	/v1/precos	Consultar vlr_venda por codtab
-Produto	GET	/v1/produtos	Popular catálogo inicial
-Genérico	GET	/v1/loadRecords	Consultas SQL customizadas (Ex: TGFCAB)
+## 3. Endpoints por Entidade
 
-## 4. Diretrizes Técnicas para o Claude
+| Entidade | Método | Endpoint / Mecanismo | Usado por |
+|---|---|---|---|
+| Auth | POST | `{SANKHYA_AUTH_URL}` | Todas as funções |
+| Produto | loadRecords | rootEntity: `Produto` (TGFPRO) | `sync-produtos` |
+| Categoria | loadRecords | rootEntity: `GrupoProduto` (TGFGRU) | `sync-categorias` |
+| Estoque | loadRecords | rootEntity: `Estoque` (TGFEST) | `sync-estoque` |
+| Preço | loadRecords | rootEntity: `PrecoProduto` (TGFPRC) | `sync-precos` |
+| Cliente | REST | `POST/PUT /v1/clientes` | planejado |
+| Pedido | loadRecords | rootEntity: `CabecalhoNota` (TGFCAB) | planejado |
 
-### Gestão de Tokens
+> **Nota:** A REST API `/v1/precos/tabela/{codtab}` e `/v1/estoque` apresentaram instabilidade nos testes. O padrão adotado para todas as entidades é o `loadRecords` via JAPE.
 
-> **Importante:** Como estamos no plano free do Supabase, evite salvar o token no banco de dados para não gerar escritas desnecessárias. Prefira obter um novo token ou utilizar o cache em memória da Edge Function se as chamadas forem sequenciais.
+---
+
+## 4. loadRecords — Padrões e Armadilhas
+
+### Base URL
+```
+{BASE}/gateway/v1/mge/service.sbr?serviceName=CRUDServiceProvider.loadRecords&outputType=json
+```
+
+Onde `{BASE}` = protocolo + host extraído do `SANKHYA_AUTH_URL`.
+
+### Paginação
+- `offsetPage` começa em **0** (base-0)
+- Página com 50 registros por padrão
+- `hasMoreResult: "true"` no response indica mais páginas
+
+### Parsing posicional
+Os campos retornam em posições numéricas (`f0`, `f1`...) mapeadas por `metadata.fields.field`. Exemplo:
+```
+metadata: { fields: { field: [{name:"CODPROD"}, {name:"DESCR"}] } }
+entity:   { f0: {"$": "123"}, f1: {"$": "Produto X"} }
+```
+Campos sem valor retornam `{}` (objeto vazio), não `null`.
+
+### Datas
+- Retornadas no formato brasileiro: `DD/MM/AAAA HH:MM:SS`
+- Fuso: UTC-3 (Brasília)
+- Converter para ISO 8601 ao salvar no Supabase
+
+### Erros
+- `data.status !== '1'` indica erro — verificar `data.statusMessage`
+- HTTP 400 na auth pode ser transitório — a função registra o erro em `log_sincronizacao`
+
+---
+
+## 5. Regras de Integração
+
+### Leitura apenas (Sankhya → Supabase)
+As funções de sync são **estritamente leitura** no Sankhya. Nenhum dado é escrito de volta ao ERP pelas funções de sincronização de catálogo.
+
+Escrita no Sankhya está prevista apenas para:
+- Criação/atualização de **cliente** (fluxo de cadastro)
+- Envio de **pedido** (fluxo de venda)
+
+### Token por execução
+Não armazenar o `access_token` em banco — obter sempre um novo no início de cada execução.
+
+### Logs obrigatórios
+Toda Edge Function de sync deve:
+1. Inserir em `log_sincronizacao` com `status='processando'` antes de qualquer chamada ao Sankhya
+2. Atualizar para `status='sucesso'` ou `status='erro'` ao finalizar
+3. Registrar `registros_processados` e `finalizado_em`
