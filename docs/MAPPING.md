@@ -183,15 +183,30 @@
 
 ---
 
-## 6. Entidade: Categoria *(planejado)*
+## 6. Entidade: Categoria
+
+### Entidade Sankhya: `GrupoProduto` (tabela `TGFGRU`)
 
 ### Tabela Supabase: `public.categoria`
 
 | Campo Sankhya | Campo Supabase | Tipo | Observação |
 |---|---|---|---|
 | `CODGRUPOPROD` | `codgrupoprod` | `bigint` | Chave primária |
-| `DESCRGRUPOPROD` (a confirmar) | `descr_grupo` | `text` | Descrição do grupo |
-| `CODGRUPOPAI` | `codgrupopai` | `bigint` | FK self-referencing para grupo pai |
+| `DESCRGRUPOPROD` | `descr_grupo` | `text` | Descrição do grupo |
+| `CODGRUPAI` | `codgrupopai` | `bigint` | FK self-referencing para grupo pai. `CODGRUPAI = 0` no Sankhya → `null` no Supabase (categoria raiz) |
+
+### Lógica de sincronização incremental
+1. Busca **todos** os grupos de produto no Sankhya (sem filtro — não há flag equivalente ao `AD_SYNCSITE`)
+2. Carrega snapshot do Supabase: `codgrupoprod, descr_grupo, codgrupopai`
+3. Para cada categoria retornada, faz upsert se **qualquer** critério for verdadeiro:
+   - **Critério 1 — Categoria nova:** `codgrupoprod` não existe no Supabase
+   - **Critério 2 — Descrição alterada:** `descr_grupo` difere entre Sankhya e Supabase
+   - **Critério 3 — Hierarquia alterada:** `codgrupopai` difere (reestruturação de grupos)
+4. Registra resultado em `log_sincronizacao`
+
+### Agendamento
+- **Cron:** `0 3 * * *` — diariamente às 03:00 (categorias mudam com menos frequência que produtos)
+- **Edge Function:** `sync-categorias`
 
 ---
 
