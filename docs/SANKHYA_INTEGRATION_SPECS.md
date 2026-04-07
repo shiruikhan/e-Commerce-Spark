@@ -52,7 +52,7 @@ grant_type=client_credentials&client_id={SANKHYA_CLIENT_ID}&client_secret={SANKH
 | Categoria | loadRecords | rootEntity: `GrupoProduto` (TGFGRU) | `sync-categorias` |
 | Estoque | loadRecords | rootEntity: `Estoque` (TGFEST) | `sync-estoque` |
 | Preço | REST GET | `/v1/precos/produto/{codprod}/tabela/{codtab}` (TGFTAB+TGFEXC) | `sync-precos` |
-| Cliente | REST | `POST/PUT /v1/clientes` | planejado |
+| Cliente | REST POST + loadRecords | `POST /v1/parceiros/clientes` + `Parceiro` (TGFPAR) | `integrar-clientes` |
 | Pedido | loadRecords | rootEntity: `CabecalhoNota` (TGFCAB) | planejado |
 
 > **Nota:** A REST API `/v1/estoque` apresentou instabilidade. O padrão para estoque, produtos e categorias é o `loadRecords` via JAPE.

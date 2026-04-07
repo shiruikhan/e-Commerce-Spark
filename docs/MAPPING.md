@@ -267,20 +267,74 @@ Authorization: Bearer {access_token}
 
 ---
 
-## 7. Entidade: Cliente *(planejado)*
+## 7. Entidade: Cliente
 
-### Tabela Supabase: `public.cliente`
+### Tabela Sankhya: `TGFPAR` (parceiros) — via REST API
+### Tabela Supabase: `public.cliente` + `public.endereco`
+### Edge Function: `integrar-clientes` | Cron: a definir (sugestão: `*/30 * * * *`)
 
-| Campo Sankhya | Campo Supabase | Tipo | Observação |
-|---|---|---|---|
-| `CODPARC` | `codparc` | `bigint` | Chave única no Sankhya |
-| `NOMEPARC` | `nome` | `text` | Nome do parceiro |
-| `CGC_CPF` | `cpf_cnpj` | `text` | CPF ou CNPJ |
-| `EMAIL` | `email` | `text` | E-mail |
-| `TELEFONE` | `telefone` | `text` | Telefone |
-| — | `id` | `uuid` | FK para `auth.users` — gerado no Supabase |
+> **Direção:** Supabase → Sankhya (outbound). Diferente das outras entidades que são leitura do ERP, clientes são **enviados** ao Sankhya após uma compra.
 
-**Endpoints Sankhya:** `POST /v1/clientes` (criar) · `PUT /v1/clientes` (atualizar)
+### Endpoints utilizados
+
+| Método | Endpoint | Finalidade |
+|---|---|---|
+| `POST` | `/v1/parceiros/clientes` | Cria novo parceiro na TGFPAR |
+| `loadRecords` | rootEntity: `Parceiro` (TGFPAR) | Verifica se CPF já existe antes de criar |
+
+### Critérios de elegibilidade (obrigatório tudo)
+- `codparc IS NULL` — ainda não integrado ao Sankhya
+- CPF com 11 dígitos (somente Pessoa Física)
+- Pelo menos 1 pedido na tabela `pedido`
+
+### Mapeamento Supabase → Sankhya (POST body)
+
+```json
+{
+  "contatos": [{
+    "tipo":           "PF",
+    "cnpjCpf":        "cliente.cpf_cnpj (só dígitos)",
+    "nome":           "cliente.nome",
+    "email":          "cliente.email",
+    "telefoneDdd":    "cliente.telefone (2 primeiros dígitos)",
+    "telefoneNumero": "cliente.telefone (demais dígitos)",
+    "endereco": {
+      "cep":         "endereco.cep (só dígitos)",
+      "logradouro":  "endereco.logradouro",
+      "numero":      "endereco.numero",
+      "complemento": "endereco.complemento",
+      "bairro":      "endereco.bairro",
+      "cidade":      "endereco.cidade",
+      "uf":          "endereco.uf"
+    }
+  }]
+}
+```
+
+### Response do POST e atualização do Supabase
+
+| Campo Response | Campo Supabase | Observação |
+|---|---|---|
+| `codigoCliente` | `cliente.codparc` | CODPARC gerado pelo Sankhya — salvo após criação |
+
+### Verificação de duplicata (loadRecords antes do POST)
+
+Antes de criar, a função consulta TGFPAR filtrando por `CGC_CPF` (com e sem máscara). Se já existir:
+- Ação: `reconciliado` — apenas salva o CODPARC existente no Supabase, sem criar novo parceiro
+
+### Fluxo completo por cliente
+
+```
+1. Busca clientes elegíveis (PF + sem codparc + com pedido)
+2. Para cada cliente (lotes de 5 em paralelo):
+   a. loadRecords TGFPAR → busca por CPF
+   b. Se encontrado → reconcilia codparc no Supabase
+   c. Se não encontrado → POST /v1/parceiros/clientes → salva codigoCliente
+3. Loga resultado em log_sincronizacao (entidade='cliente')
+```
+
+### Referência ao script anterior (TGSPAR.py)
+O script Python anterior (`TGSPAR.py`) enviava dados para uma tabela intermediária `AD_TGSPAR` via `DatasetSP.save`. A nova implementação envia **diretamente para TGFPAR** via REST API, sem tabela intermediária, com verificação de duplicata por CPF e retorno do CODPARC gerado.
 
 ---
 
