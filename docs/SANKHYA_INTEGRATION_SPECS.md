@@ -51,11 +51,12 @@ grant_type=client_credentials&client_id={SANKHYA_CLIENT_ID}&client_secret={SANKH
 | Produto | loadRecords | rootEntity: `Produto` (TGFPRO) | `sync-produtos` |
 | Categoria | loadRecords | rootEntity: `GrupoProduto` (TGFGRU) | `sync-categorias` |
 | Estoque | loadRecords | rootEntity: `Estoque` (TGFEST) | `sync-estoque` |
-| Preço | loadRecords | rootEntity: `PrecoProduto` (TGFPRC) | `sync-precos` |
+| Preço | REST GET | `/v1/precos/produto/{codprod}/tabela/{codtab}` (TGFTAB+TGFEXC) | `sync-precos` |
 | Cliente | REST | `POST/PUT /v1/clientes` | planejado |
 | Pedido | loadRecords | rootEntity: `CabecalhoNota` (TGFCAB) | planejado |
 
-> **Nota:** A REST API `/v1/precos/tabela/{codtab}` e `/v1/estoque` apresentaram instabilidade nos testes. O padrão adotado para todas as entidades é o `loadRecords` via JAPE.
+> **Nota:** A REST API `/v1/estoque` apresentou instabilidade. O padrão para estoque, produtos e categorias é o `loadRecords` via JAPE.
+> **Preços usam REST API individual por produto** (`/v1/precos/produto/{codprod}/tabela/{codtab}`), pois a fonte correta é `TGFTAB`+`TGFEXC` (não `TGFPRC`). A REST abstrai essa estrutura e se mostrou estável nos testes (07/04/2026).
 
 ---
 

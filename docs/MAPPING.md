@@ -204,26 +204,66 @@ O Sankhya **remove** a linha da TGFEST quando o estoque chega a zero. Para detec
 
 ## 6. Entidade: Preço
 
-### Tabela Sankhya: `TGFPRC` | rootEntity: `PrecoProduto`
+### Tabelas Sankhya: `TGFTAB` (cabeçalho) + `TGFEXC` (itens) — via REST API
 ### Tabela Supabase: `public.preco`
 ### Edge Function: `sync-precos` | Cron: `0 1 * * *` (diário às 01h)
 
-| Campo Sankhya | Campo Supabase | Tipo | Observação |
+> **⚠️ Correção de documentação (07/04/2026):** A tabela `TGFPRC` (`rootEntity: PrecoProduto`) **não** é a fonte correta de preços nesta instalação. A estrutura correta é `TGFTAB` (cabeçalho da tabela de preços) ligada à `TGFEXC` (itens/exceções) via `NUTAB`. O acesso é feito via **REST API por produto**, que abstrai essa estrutura internamente.
+
+### Endpoint utilizado
+```
+GET {BASE}/v1/precos/produto/{codigoProduto}/tabela/{codigoTabela}?pagina=1
+Authorization: Bearer {access_token}
+```
+
+| Parâmetro | Valor | Origem |
+|---|---|---|
+| `codigoProduto` | `codprod` do produto | Entidade `Produto` (CODPROD) |
+| `codigoTabela` | `201` | Entidade `TabelaPreco` (COTAB / TGFTAB) |
+| `pagina` | base-1 (começa em 1) | — |
+
+### Estrutura do Response
+```json
+{
+  "codigo": "200",
+  "pagina": 1,
+  "numeroRegistros": 1,
+  "temMaisRegistros": false,
+  "produtos": [
+    {
+      "codigoProduto": 313407,
+      "codigoLocalEstoque": 0,
+      "controle": " ",
+      "unidade": "UN",
+      "valor": 1999
+    }
+  ]
+}
+```
+
+### Mapeamento de campos
+
+| Campo Response | Campo Supabase | Tipo | Observação |
 |---|---|---|---|
-| `CODPROD` | `codprod` | `bigint` | FK para `produto` |
-| `VLRVENDA` | `vlr_venda` | `numeric` | Preço de venda |
-| `CODTAB` | `codtab` | `bigint` | Código da tabela (201 = e-commerce) |
+| `codigoProduto` | `codprod` | `bigint` | FK para `produto` |
+| `valor` | `vlr_venda` | `numeric` | Preço de venda |
+| — (constante 201) | `codtab` | `bigint` | Código da tabela de preços |
 | — | `dtalter` | `timestamptz` | Timestamp da atualização pelo sync |
 
-### Filtros da query
-- `CODTAB = 201`
+### Filtros e lógica
+- Chamada individual por produto (1 request por produto)
 - Apenas produtos presentes na tabela `produto` (com `AD_SYNCSITE='S'`)
-
-### Lógica incremental
+- Prioriza registro com `codigoLocalEstoque = 0` (preço base); fallback para o primeiro registro
 - Upsert com `onConflict: 'codprod,codtab'`
 - Atualiza apenas se `vlr_venda` mudou ou produto é novo
 
-> **Nota técnica:** A REST API `/v1/precos/tabela/{codtab}` apresentou instabilidade (timeout). O sync usa `loadRecords` com `rootEntity: 'PrecoProduto'`, que é o padrão confiável para todas as entidades.
+### Estratégia de execução
+- Lotes de 10 produtos em paralelo (`Promise.allSettled`)
+- 82 produtos ÷ 10 por lote ≈ 9 lotes × ~3s = ~27s total (bem dentro do limite de 150s)
+- Guard de deadline em 130s para encerramento gracioso
+- Timeout de 15s por chamada HTTP individual
+
+> **Nota:** A REST API retorna até 50 registros por página por produto. Registros adicionais representam variantes de preço (por local de estoque ou controle). Para e-commerce, apenas o registro com `codigoLocalEstoque=0` é utilizado.
 
 ---
 

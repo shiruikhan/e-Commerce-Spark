@@ -1,8 +1,18 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
 
-// Tabela de preço do e-commerce no Sankhya
+// Código da tabela de preços do e-commerce (COTAB na entidade TabelaPreco / TGFTAB)
 const CODTAB = 201;
+
+// Quantos produtos processar em paralelo por rodada
+// 82 produtos / 10 por lote = ~9 lotes, ~2-3s cada = ~20-30s total (bem dentro do limite)
+const BATCH_SIZE = 10;
+
+// Guard: encerra graciosamente antes dos 150s do runtime
+const DEADLINE_MS = 130_000;
+
+// Timeout por chamada HTTP individual ao Sankhya
+const HTTP_TIMEOUT_MS = 15_000;
 
 interface PrecoRow {
   codprod: number;
@@ -10,31 +20,33 @@ interface PrecoRow {
   codtab: number;
 }
 
-// Snapshot do Supabase usado para comparação incremental
-interface ExistenteRow {
-  vlr_venda: number | null;
-}
-
 // ---------------------------------------------------------------------------
-// Auth Sankhya
+// Auth Sankhya — OAuth 2.0 Client Credentials
 // ---------------------------------------------------------------------------
 async function getSankhyaToken(): Promise<string> {
-  const res = await fetch(Deno.env.get('SANKHYA_AUTH_URL')!, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/x-www-form-urlencoded',
-      'X-Token': Deno.env.get('SANKHYA_X_TOKEN')!,
-    },
-    body: new URLSearchParams({
-      grant_type:    'client_credentials',
-      client_id:     Deno.env.get('SANKHYA_CLIENT_ID')!,
-      client_secret: Deno.env.get('SANKHYA_CLIENT_SECRET')!,
-    }).toString(),
-  });
-  if (!res.ok) throw new Error(`Auth Sankhya falhou: ${res.status} ${await res.text()}`);
-  const { access_token } = await res.json();
-  if (!access_token) throw new Error('access_token não recebido');
-  return access_token;
+  const controller = new AbortController();
+  const tid = setTimeout(() => controller.abort(), HTTP_TIMEOUT_MS);
+  try {
+    const res = await fetch(Deno.env.get('SANKHYA_AUTH_URL')!, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded',
+        'X-Token': Deno.env.get('SANKHYA_X_TOKEN')!,
+      },
+      body: new URLSearchParams({
+        grant_type:    'client_credentials',
+        client_id:     Deno.env.get('SANKHYA_CLIENT_ID')!,
+        client_secret: Deno.env.get('SANKHYA_CLIENT_SECRET')!,
+      }).toString(),
+      signal: controller.signal,
+    });
+    if (!res.ok) throw new Error(`Auth Sankhya falhou: ${res.status} ${await res.text()}`);
+    const { access_token } = await res.json();
+    if (!access_token) throw new Error('access_token não recebido');
+    return access_token;
+  } finally {
+    clearTimeout(tid);
+  }
 }
 
 function getApiBase(authUrl: string): string {
@@ -43,131 +55,82 @@ function getApiBase(authUrl: string): string {
 }
 
 // ---------------------------------------------------------------------------
-// Parsing posicional (f0, f1, f2...)
+// Busca o preço de um produto na tabela de preços
+// Endpoint: GET /v1/precos/produto/{codprod}/tabela/{codtab}?pagina=1
+//
+// Response:
+// {
+//   "codigo": "200",
+//   "pagina": 1,
+//   "temMaisRegistros": false,
+//   "produtos": [
+//     { "codigoProduto": 313407, "codigoLocalEstoque": 0, "controle": " ", "unidade": "UN", "valor": 1999 }
+//   ]
+// }
+//
+// Notas:
+// - Paginação base-1 (pagina=1 é a primeira)
+// - Um produto pode ter múltiplos registros (por localEstoque ou controle/variante)
+//   → Prioriza codigoLocalEstoque=0 (preço base); fallback para o primeiro registro
+// - "valor" é o preço de venda (número)
+// - Retorna null se o produto não tiver preço cadastrado nessa tabela
 // ---------------------------------------------------------------------------
-function buildFieldMap(metadata: unknown): Record<string, number> {
-  const map: Record<string, number> = {};
-  const list = ((metadata as Record<string,unknown>)?.fields as Record<string,unknown>)?.field;
-  if (Array.isArray(list)) {
-    list.forEach((f: Record<string, unknown>, i: number) => {
-      if (f.name) map[String(f.name)] = i;
-    });
-  }
-  return map;
-}
-
-function getField(
-  entity: Record<string, unknown>,
-  fieldName: string,
-  fieldMap: Record<string, number>,
-): string | null {
-  const pos = fieldMap[fieldName];
-  if (pos === undefined) return null;
-  const cell = entity[`f${pos}`];
-  if (!cell || typeof cell !== 'object') return null;
-  const val = (cell as Record<string, unknown>)['$'];
-  if (val === undefined || val === null || val === '') return null;
-  return String(val);
-}
-
-function toNumeric(val: string | null): number | null {
-  if (!val) return null;
-  const n = parseFloat(val.replace(',', '.'));
-  return isNaN(n) ? null : n;
-}
-
-function normalizar(
-  entity: Record<string, unknown>,
-  fieldMap: Record<string, number>,
-  produtosConhecidos: Set<number>,
-): PrecoRow | null {
-  const codprod = Number(getField(entity, 'CODPROD', fieldMap));
-  if (!codprod || isNaN(codprod)) return null;
-
-  // Ignora produtos que não estão na tabela produto (não têm AD_SYNCSITE='S')
-  if (!produtosConhecidos.has(codprod)) return null;
-
-  const vlr_venda = toNumeric(getField(entity, 'VLRVENDA', fieldMap));
-  if (vlr_venda === null) return null;
-
-  return { codprod, vlr_venda, codtab: CODTAB };
-}
-
-// ---------------------------------------------------------------------------
-// Decide se o preço precisa de upsert.
-// Atualiza se:
-//   1. Produto não tem preço registrado no Supabase (novo)
-//   2. vlr_venda mudou
-// ---------------------------------------------------------------------------
-function precisaAtualizar(sankhya: PrecoRow, existente: ExistenteRow | undefined): boolean {
-  if (existente === undefined) return true;
-  if (existente.vlr_venda === null) return true;
-  if (sankhya.vlr_venda !== existente.vlr_venda) return true;
-  return false;
-}
-
-// ---------------------------------------------------------------------------
-// Busca página do Sankhya via loadRecords — TGFPRC filtrada por CODTAB
-// Usa offsetPage base-0 (padrão do loadRecords)
-// ---------------------------------------------------------------------------
-async function fetchPagina(
+async function fetchPreco(
   token: string,
   apiBase: string,
-  page: number,
-): Promise<{ precos: Array<Record<string, unknown>>; fieldMap: Record<string, number>; hasMore: boolean }> {
-  const body = {
-    serviceName: 'CRUDServiceProvider.loadRecords',
-    requestBody: {
-      dataSet: {
-        rootEntity: 'PrecoProduto',
-        ignoreCalculatedFields: 'true',
-        offsetPage: String(page),
-        criteria: {
-          expression: { $: 'CODTAB = ?' },
-          parameter: [
-            { $: String(CODTAB), type: 'I' },
-          ],
+  codprod: number,
+): Promise<PrecoRow | null> {
+  let pagina = 1;
+
+  while (true) {
+    const controller = new AbortController();
+    const tid = setTimeout(() => controller.abort(), HTTP_TIMEOUT_MS);
+
+    let data: Record<string, unknown>;
+    try {
+      const res = await fetch(
+        `${apiBase}/v1/precos/produto/${codprod}/tabela/${CODTAB}?pagina=${pagina}`,
+        {
+          method: 'GET',
+          headers: { 'Authorization': `Bearer ${token}`, 'accept': 'application/json' },
+          signal: controller.signal,
         },
-        entity: [{
-          path: '',
-          fieldset: {
-            list: 'CODPROD,VLRVENDA,CODTAB',
-          },
-        }],
-      },
-    },
-  };
+      );
+      if (!res.ok) {
+        // Produto sem preço nessa tabela — não é erro crítico
+        if (res.status === 404) return null;
+        throw new Error(`HTTP ${res.status}: ${await res.text()}`);
+      }
+      data = await res.json() as Record<string, unknown>;
+    } finally {
+      clearTimeout(tid);
+    }
 
-  const url = `${apiBase}/gateway/v1/mge/service.sbr?serviceName=CRUDServiceProvider.loadRecords&outputType=json`;
-  const res = await fetch(url, {
-    method: 'POST',
-    headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify(body),
-  });
-  if (!res.ok) throw new Error(`loadRecords falhou: ${res.status} ${await res.text()}`);
+    const produtos = data?.produtos as Array<Record<string, unknown>> | undefined;
+    if (!produtos?.length) return null;
 
-  const data = await res.json();
-  if (data.status !== '1' && data.status !== 1) {
-    throw new Error(`Sankhya erro: ${JSON.stringify(data.statusMessage ?? data.error ?? data)}`);
+    // Prioriza preço base (codigoLocalEstoque = 0); fallback para o primeiro registro
+    const registro =
+      produtos.find(p => p.codigoLocalEstoque === 0) ?? produtos[0];
+
+    const valor = registro?.valor;
+    if (valor === undefined || valor === null) return null;
+
+    const vlr = typeof valor === 'number' ? valor : parseFloat(String(valor));
+    if (isNaN(vlr)) return null;
+
+    // Se houver mais páginas, elas contêm variantes (controle/local de estoque).
+    // Para e-commerce só precisamos do preço base — retorna já.
+    return { codprod, vlr_venda: vlr, codtab: CODTAB };
   }
-
-  const entities = data?.responseBody?.entities;
-  const fieldMap = buildFieldMap(entities?.metadata);
-  const rawList: Record<string, unknown>[] = Array.isArray(entities?.entity)
-    ? entities.entity
-    : (entities?.entity ? [entities.entity] : []);
-
-  return {
-    precos: rawList,
-    fieldMap,
-    hasMore: entities?.hasMoreResult === 'true' || entities?.hasMoreResult === true,
-  };
 }
 
 // ---------------------------------------------------------------------------
 // Handler principal
 // ---------------------------------------------------------------------------
 Deno.serve(async (_req: Request) => {
+  const startTime = Date.now();
+
   const supabase = createClient(
     Deno.env.get('SUPABASE_URL')!,
     Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!,
@@ -185,64 +148,106 @@ Deno.serve(async (_req: Request) => {
     const token   = await getSankhyaToken();
     const apiBase = getApiBase(Deno.env.get('SANKHYA_AUTH_URL')!);
 
-    // Snapshot do Supabase para comparação incremental
+    // Snapshot local para comparação incremental (evita upserts desnecessários)
     const { data: existentes, error: existErr } = await supabase
       .from('preco')
       .select('codprod, vlr_venda')
       .eq('codtab', CODTAB);
-    if (existErr) throw new Error(`Falha ao carregar preços: ${existErr.message}`);
+    if (existErr) throw new Error(`Falha ao carregar preços locais: ${existErr.message}`);
 
-    const mapaLocal = new Map<number, ExistenteRow>(
-      (existentes ?? []).map(p => [p.codprod as number, {
-        vlr_venda: p.vlr_venda as number | null,
-      }])
+    const mapaLocal = new Map<number, number | null>(
+      (existentes ?? []).map(p => [p.codprod as number, p.vlr_venda as number | null]),
     );
 
-    // Apenas produtos com AD_SYNCSITE='S'
+    // Lista de produtos ativos (AD_SYNCSITE='S')
     const { data: produtos, error: prodErr } = await supabase
       .from('produto')
       .select('codprod');
     if (prodErr) throw new Error(`Falha ao carregar produtos: ${prodErr.message}`);
 
-    const produtosConhecidos = new Set<number>(
-      (produtos ?? []).map(p => p.codprod as number)
-    );
+    const listaProdutos = (produtos ?? []).map(p => p.codprod as number);
+    const total = listaProdutos.length;
 
-    let page            = 0; // loadRecords usa base-0
     let totalProcessado = 0;
+    let totalSemPreco   = 0;
     let totalIgnorado   = 0;
-    let hasMore         = true;
+    let totalErro       = 0;
+    let deadlineAtingido = false;
 
-    while (hasMore) {
-      const { precos: rawList, fieldMap, hasMore: more } = await fetchPagina(token, apiBase, page);
-      hasMore = more;
-      page++;
+    // Processa em lotes paralelos para concluir rápido sem sobrecarregar a API
+    for (let i = 0; i < total; i += BATCH_SIZE) {
+      if (Date.now() - startTime > DEADLINE_MS) {
+        deadlineAtingido = true;
+        break;
+      }
 
-      const pagResult = rawList
-        .map(e => normalizar(e, fieldMap, produtosConhecidos))
-        .filter((e): e is PrecoRow => e !== null);
+      const lote = listaProdutos.slice(i, i + BATCH_SIZE);
 
-      const aAtualizar = pagResult.filter(p => precisaAtualizar(p, mapaLocal.get(p.codprod)));
-      totalIgnorado += pagResult.length - aAtualizar.length;
+      const resultados = await Promise.allSettled(
+        lote.map(codprod => fetchPreco(token, apiBase, codprod)),
+      );
 
-      if (aAtualizar.length === 0) continue;
+      const aUpsert: PrecoRow[] = [];
 
-      const payload = aAtualizar.map(p => ({ ...p, dtalter: new Date().toISOString() }));
+      for (let j = 0; j < lote.length; j++) {
+        const codprod = lote[j];
+        const res = resultados[j];
 
-      const { error: upsertErr } = await supabase
-        .from('preco')
-        .upsert(payload, { onConflict: 'codprod,codtab' });
-      if (upsertErr) throw new Error(`Upsert falhou: ${upsertErr.message}`);
+        if (res.status === 'rejected') {
+          totalErro++;
+          console.error(`Erro produto ${codprod}: ${res.reason}`);
+          continue;
+        }
 
-      totalProcessado += aAtualizar.length;
+        const preco = res.value;
+        if (!preco) { totalSemPreco++; continue; }
+
+        // Só faz upsert se o preço mudou ou é novo
+        const vlrAtual = mapaLocal.get(codprod);
+        if (vlrAtual !== undefined && vlrAtual === preco.vlr_venda) {
+          totalIgnorado++;
+          continue;
+        }
+
+        aUpsert.push(preco);
+      }
+
+      if (aUpsert.length > 0) {
+        const payload = aUpsert.map(p => ({ ...p, dtalter: new Date().toISOString() }));
+        const { error: upsertErr } = await supabase
+          .from('preco')
+          .upsert(payload, { onConflict: 'codprod,codtab' });
+        if (upsertErr) throw new Error(`Upsert falhou: ${upsertErr.message}`);
+        totalProcessado += aUpsert.length;
+      }
     }
+
+    const statusFinal = deadlineAtingido ? 'parcial' : 'sucesso';
+    const mensagem = deadlineAtingido
+      ? `Deadline atingido. Processados ${totalProcessado} de ${total} produtos.`
+      : undefined;
 
     await supabase
       .from('log_sincronizacao')
-      .update({ status: 'sucesso', registros_processados: totalProcessado, finalizado_em: new Date().toISOString() })
+      .update({
+        status: statusFinal,
+        registros_processados: totalProcessado,
+        mensagem_erro: mensagem ?? null,
+        finalizado_em: new Date().toISOString(),
+      })
       .eq('id', logId);
 
-    return json({ success: true, registros_processados: totalProcessado, registros_ignorados: totalIgnorado });
+    return json({
+      success: true,
+      status: statusFinal,
+      total_produtos: total,
+      registros_atualizados: totalProcessado,
+      registros_ignorados: totalIgnorado,
+      sem_preco_na_tabela: totalSemPreco,
+      erros_individuais: totalErro,
+      tempo_ms: Date.now() - startTime,
+      ...(deadlineAtingido && { aviso: mensagem }),
+    });
 
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
