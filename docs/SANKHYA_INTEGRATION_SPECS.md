@@ -51,6 +51,7 @@ grant_type=client_credentials&client_id={SANKHYA_CLIENT_ID}&client_secret={SANKH
 | Produto | loadRecords | rootEntity: `Produto` (TGFPRO) | `sync-produtos` |
 | Categoria | loadRecords | rootEntity: `GrupoProduto` (TGFGRU) | `sync-categorias` |
 | Estoque | loadRecords | rootEntity: `Estoque` (TGFEST) | `sync-estoque` |
+| Especificação | loadRecords | rootEntity: `AD_PROESP` (tabela customizada) | `sync-especificacoes` |
 | Preço | REST GET | `/v1/precos/produto/{codprod}/tabela/{codtab}` (TGFTAB+TGFEXC) | `sync-precos` |
 | Cliente | REST POST + loadRecords | `POST /v1/parceiros/clientes` + `Parceiro` (TGFPAR) | `integrar-clientes` |
 | Pedido | loadRecords | rootEntity: `CabecalhoNota` (TGFCAB) | planejado |

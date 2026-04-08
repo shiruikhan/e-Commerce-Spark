@@ -117,7 +117,34 @@ Usado por `sync-categorias`, `sync-estoque`, `sync-precos` e `sync-produtos`.
 
 ---
 
-## 3. Entidade: Produto
+## 3. Entidade: Especificação Técnica
+
+### Tabela Sankhya: `AD_PROESP` (tabela customizada) | rootEntity: `AD_PROESP`
+### Tabela Supabase: `public.especificacao`
+### Edge Function: `sync-especificacoes` | Cron: `0 2 * * *` (diário às 02h UTC)
+
+| Campo Sankhya | Campo Supabase | Tipo | Observação |
+|---|---|---|---|
+| `NUESP`   | `id_espec` | `bigint` | Chave primária — upsert via `onConflict: id_espec` |
+| `CODPROD` | `codprod`  | `bigint` | FK para `produto` |
+| `TIPESP`  | `label`    | `text`   | Tipo / label da especificação |
+| `VLRESP`  | `valor`    | `text`   | Valor da especificação |
+
+### Estratégia de sync
+Sync **completo** diário (AD_PROESP não tem campo de data de alteração):
+1. Busca todos os registros de `AD_PROESP` sem filtro (paginado — ver nota abaixo)
+2. Filtra apenas produtos presentes na tabela `produto` (AD_SYNCSITE='S')
+3. Compara com snapshot do Supabase
+4. **Upsert** dos registros novos ou alterados (`onConflict: id_espec`)
+5. **Delete** dos registros que sumiram do Sankhya (specs removidas do ERP)
+
+> **Paginação AD_PROESP:** A função envia `limitPag: 500`, mas o Sankhya ignora esse valor para esta tabela e retorna no máximo **50 registros/página**. O offset é calculado com base no tamanho real da página retornada (`offsetPage × 50`), **não** pelo `limitPag` enviado. Comportamento confirmado em testes (08/04/2026): página 0 → offset 0, página 1 → offset 50. A paginação funciona corretamente.
+
+> **Deadline guard:** Se o limite de 130s for atingido antes de concluir a leitura completa do Sankhya, a função aborta **sem alterar o banco** (status=`parcial`). Isso preserva a consistência — prefere não atualizar a atualizar parcialmente.
+
+---
+
+## 4. Entidade: Produto
 
 ### Tabela Sankhya: `TGFPRO` | rootEntity: `Produto`
 ### Tabela Supabase: `public.produto`
