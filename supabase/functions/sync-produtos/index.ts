@@ -12,6 +12,7 @@ interface ProdutoRow {
   altura: number | null;
   largura: number | null;
   comprimento: number | null;
+  codgrupoprod: number | null;
 }
 
 // Snapshot do Supabase usado para comparação local
@@ -21,6 +22,7 @@ interface ExistenteRow {
   altura: number | null;
   largura: number | null;
   comprimento: number | null;
+  codgrupoprod: number | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -84,10 +86,11 @@ function precisaAtualizar(sankhya: ProdutoRow, existente: ExistenteRow | undefin
   if (sankhya.dtalter && !existente.dtalter) return true;
 
   // Campos nulos no Supabase mas preenchidos no Sankhya?
-  if (sankhya.peso        !== null && existente.peso        === null) return true;
-  if (sankhya.altura      !== null && existente.altura      === null) return true;
-  if (sankhya.largura     !== null && existente.largura     === null) return true;
-  if (sankhya.comprimento !== null && existente.comprimento === null) return true;
+  if (sankhya.peso         !== null && existente.peso         === null) return true;
+  if (sankhya.altura       !== null && existente.altura       === null) return true;
+  if (sankhya.largura      !== null && existente.largura      === null) return true;
+  if (sankhya.comprimento  !== null && existente.comprimento  === null) return true;
+  if (sankhya.codgrupoprod !== null && existente.codgrupoprod === null) return true;
 
   return false;
 }
@@ -134,10 +137,11 @@ function normalizar(
     desccurta:    getField(entity, 'AD_DESCCURTA',    fieldMap),
     descrprodoed: getField(entity, 'AD_DESCRPRODOED', fieldMap),
     dtalter:      dtalterRaw ? sankhyaToIso(dtalterRaw) : null,
-    peso:         toNumeric(getField(entity, 'PESOBRUTO', fieldMap)),
-    altura:       toNumeric(getField(entity, 'ALTURA',    fieldMap)),
-    largura:      toNumeric(getField(entity, 'LARGURA',   fieldMap)),
-    comprimento:  toNumeric(getField(entity, 'ESPESSURA', fieldMap)),
+    peso:         toNumeric(getField(entity, 'PESOBRUTO',    fieldMap)),
+    altura:       toNumeric(getField(entity, 'ALTURA',       fieldMap)),
+    largura:      toNumeric(getField(entity, 'LARGURA',      fieldMap)),
+    comprimento:  toNumeric(getField(entity, 'ESPESSURA',    fieldMap)),
+    codgrupoprod: toNumeric(getField(entity, 'CODGRUPOPROD', fieldMap)),
   };
 }
 
@@ -163,7 +167,7 @@ async function fetchPagina(
         entity: [{
           path: '',
           fieldset: {
-            list: 'CODPROD,DESCRPROD,AD_COMNOME,AD_DESCCURTA,AD_DESCRPRODOED,DTALTER,PESOBRUTO,ALTURA,LARGURA,ESPESSURA',
+            list: 'CODPROD,DESCRPROD,AD_COMNOME,AD_DESCCURTA,AD_DESCRPRODOED,DTALTER,PESOBRUTO,ALTURA,LARGURA,ESPESSURA,CODGRUPOPROD',
           },
         }],
       },
@@ -220,16 +224,17 @@ Deno.serve(async (_req: Request) => {
     // para detectar tanto produtos modificados quanto campos recém-adicionados ao sync
     const { data: existentes, error: existErr } = await supabase
       .from('produto')
-      .select('codprod, dtalter, peso, altura, largura, comprimento');
+      .select('codprod, dtalter, peso, altura, largura, comprimento, codgrupoprod');
     if (existErr) throw new Error(`Falha ao carregar produtos: ${existErr.message}`);
 
     const mapaLocal = new Map<number, ExistenteRow>(
       (existentes ?? []).map(p => [p.codprod as number, {
-        dtalter:     p.dtalter     as string | null,
-        peso:        p.peso        as number | null,
-        altura:      p.altura      as number | null,
-        largura:     p.largura     as number | null,
-        comprimento: p.comprimento as number | null,
+        dtalter:      p.dtalter      as string | null,
+        peso:         p.peso         as number | null,
+        altura:       p.altura       as number | null,
+        largura:      p.largura      as number | null,
+        comprimento:  p.comprimento  as number | null,
+        codgrupoprod: p.codgrupoprod as number | null,
       }])
     );
 

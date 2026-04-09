@@ -167,14 +167,16 @@ Sync **completo** diário (AD_PROESP não tem campo de data de alteração):
 
 ### Lógica incremental
 1. Busca todos os produtos com `AD_SYNCSITE='S'` (sem filtro de data na query)
-2. Snapshot do Supabase: `codprod, dtalter, peso, altura, largura, comprimento`
+2. Snapshot do Supabase: `codprod, dtalter, peso, altura, largura, comprimento, codgrupoprod`
 3. Upsert se qualquer critério for verdadeiro:
    - Produto novo (codprod não existe no Supabase)
    - `DTALTER` do Sankhya mais recente que `dtalter` do Supabase
-   - Algum campo mapeado está `null` no Supabase mas tem valor no Sankhya
+   - Algum campo mapeado está `null` no Supabase mas tem valor no Sankhya (inclui `codgrupoprod`)
 
 > **Por que não filtrar por DTALTER no Sankhya?**
 > Quando `AD_SYNCSITE` muda de `'N'` para `'S'`, o `DTALTER` do produto pode não ser atualizado. Filtrar no Sankhya faria com que esses produtos fossem ignorados.
+
+> **Migração `codgrupoprod` (09/04/2026):** O campo `CODGRUPOPROD` foi adicionado ao sync após a criação das categorias. Como os produtos foram sincronizados antes de a entidade `categoria` existir, o campo `codgrupoprod` estava nulo em todos os registros. A lógica "campo nulo no Supabase mas preenchido no Sankhya" garante que na próxima execução do cron todos os produtos tenham o campo preenchido automaticamente, sem necessidade de re-sync manual forçado.
 
 ---
 
