@@ -8,6 +8,10 @@
 - **Preços:** https://developer.sankhya.com.br/reference/getprecoprodutotabela
 - **Produtos:** https://developer.sankhya.com.br/reference/get_v1-produtos
 - **Consultas Genéricas (loadRecords):** https://developer.sankhya.com.br/reference/get_loadrecords
+- **Incluir Pedido de Venda:** https://developer.sankhya.com.br/reference/addpedido
+- **Atualizar Pedido de Venda:** https://developer.sankhya.com.br/reference/putpedido
+- **Cancelar Pedido de Venda:** https://developer.sankhya.com.br/reference/postcancelapedido
+- **Consultar Pedidos de Venda:** https://developer.sankhya.com.br/reference/getpedidos
 
 ---
 
@@ -54,7 +58,7 @@ grant_type=client_credentials&client_id={SANKHYA_CLIENT_ID}&client_secret={SANKH
 | Especificação | loadRecords | rootEntity: `AD_PROESP` (tabela customizada) | `sync-especificacoes` |
 | Preço | REST GET | `/v1/precos/produto/{codprod}/tabela/{codtab}` (TGFTAB+TGFEXC) | `sync-precos` |
 | Cliente | REST POST + loadRecords | `POST /v1/parceiros/clientes` + `Parceiro` (TGFPAR) | `integrar-clientes` |
-| Pedido | loadRecords | rootEntity: `CabecalhoNota` (TGFCAB) | planejado |
+| Pedido | REST POST + REST POST | `POST /v1/vendas/pedidos` + `POST /v1/vendas/pedidos/{nunota}/cancela` | `integrar-pedidos` |
 
 > **Nota:** A REST API `/v1/estoque` apresentou instabilidade. O padrão para estoque, produtos e categorias é o `loadRecords` via JAPE.
 > **Preços usam REST API individual por produto** (`/v1/precos/produto/{codprod}/tabela/{codtab}`), pois a fonte correta é `TGFTAB`+`TGFEXC` (não `TGFPRC`). A REST abstrai essa estrutura e se mostrou estável nos testes (07/04/2026).
@@ -100,8 +104,8 @@ Campos sem valor retornam `{}` (objeto vazio), não `null`.
 As funções de sync são **estritamente leitura** no Sankhya. Nenhum dado é escrito de volta ao ERP pelas funções de sincronização de catálogo.
 
 Escrita no Sankhya está prevista apenas para:
-- Criação/atualização de **cliente** (fluxo de cadastro)
-- Envio de **pedido** (fluxo de venda)
+- Criação/atualização de **cliente** (fluxo de cadastro) — `integrar-clientes`
+- Envio e cancelamento de **pedido** (fluxo de venda) — `integrar-pedidos`
 
 ### Token por execução
 Não armazenar o `access_token` em banco — obter sempre um novo no início de cada execução.

@@ -144,13 +144,22 @@ Cabeçalho do pedido. Persiste no Supabase antes de ir ao Sankhya.
 | `id` | `bigint` | NO | — | PK |
 | `nunota` | `bigint` | YES | — | Número de nota no Sankhya (preenchido após integração) |
 | `cliente_id` | `uuid` | YES | — | FK → `cliente.id` |
-| `status` | `text` | YES | `'pendente'` | Status do pedido |
-| `vlr_total` | `numeric` | YES | `0` | Valor total do pedido |
+| `status` | `text` | YES | `'pendente'` | Status do pedido — ver valores possíveis abaixo |
+| `vlr_total` | `numeric` | YES | `0` | Valor total do pedido (inclui frete) |
 | `vlr_frete` | `numeric` | YES | `0` | Valor do frete |
 | `peso_total` | `numeric` | YES | — | Peso total calculado |
 | `dt_pedido` | `timestamptz` | YES | `now()` | Data/hora do pedido |
-| `metodo_pagamento` | `text` | YES | — | Método de pagamento |
-| `log_erro_integracao` | `text` | YES | — | Último erro de integração com Sankhya |
+| `metodo_pagamento` | `text` | YES | — | `'pix'` / `'boleto'` / `'cartao'` |
+| `log_erro_integracao` | `text` | YES | — | Último erro de integração com Sankhya (limpo após sucesso) |
+
+**Valores possíveis de `pedido.status`:**
+
+| Valor | Descrição |
+|---|---|
+| `pendente` | Pedido criado, aguardando pagamento |
+| `pago` | Pagamento confirmado — elegível para `integrar-pedidos` |
+| `integrado` | Enviado ao Sankhya com sucesso (`nunota` preenchido) |
+| `cancelado` | Cancelado via rota `/integrar-pedidos/cancelar` |
 
 ---
 
@@ -175,7 +184,7 @@ Registro de cada execução das Edge Functions de sync.
 | Coluna | Tipo | Nullable | Default | Descrição |
 |---|---|---|---|---|
 | `id` | `bigint` | NO | — | PK |
-| `entidade` | `text` | NO | — | `'produto'` / `'categoria'` / `'estoque'` / `'preco'` |
+| `entidade` | `text` | NO | — | `'produto'` / `'categoria'` / `'estoque'` / `'preco'` / `'especificacao'` / `'cliente'` / `'pedido'` |
 | `status` | `text` | NO | — | `'processando'` / `'sucesso'` / `'erro'` |
 | `registros_processados` | `integer` | YES | `0` | Quantidade de registros com upsert |
 | `mensagem_erro` | `text` | YES | — | Mensagem de erro (quando `status = 'erro'`) |

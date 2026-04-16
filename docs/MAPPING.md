@@ -300,9 +300,11 @@ Authorization: Bearer {access_token}
 
 ### Tabela Sankhya: `TGFPAR` (parceiros) — via REST API
 ### Tabela Supabase: `public.cliente` + `public.endereco`
-### Edge Function: `integrar-clientes` | Cron: a definir (sugestão: `*/30 * * * *`)
+### Edge Function: `integrar-clientes` | Cron: `integrar-clientes-30min` (`*/30 * * * *`)
 
 > **Direção:** Supabase → Sankhya (outbound). Diferente das outras entidades que são leitura do ERP, clientes são **enviados** ao Sankhya após uma compra.
+
+> **Escopo:** somente Pessoa Física (CPF com 11 dígitos). Clientes PJ (CNPJ) são **ignorados** na fase atual do projeto.
 
 ### Endpoints utilizados
 
@@ -311,10 +313,9 @@ Authorization: Bearer {access_token}
 | `POST` | `/v1/parceiros/clientes` | Cria novo parceiro na TGFPAR |
 | `loadRecords` | rootEntity: `Parceiro` (TGFPAR) | Verifica se CPF já existe antes de criar |
 
-### Critérios de elegibilidade (obrigatório tudo)
+### Critérios de elegibilidade
 - `codparc IS NULL` — ainda não integrado ao Sankhya
 - CPF com 11 dígitos (somente Pessoa Física)
-- Pelo menos 1 pedido na tabela `pedido`
 
 ### Mapeamento Supabase → Sankhya (POST body)
 
@@ -346,19 +347,25 @@ Authorization: Bearer {access_token}
 |---|---|---|
 | `codigoCliente` | `cliente.codparc` | CODPARC gerado pelo Sankhya — salvo após criação |
 
-### Verificação de duplicata (loadRecords antes do POST)
+### Verificação de duplicata e fluxo por cliente
 
-Antes de criar, a função consulta TGFPAR filtrando por `CGC_CPF` (com e sem máscara). Se já existir:
-- Ação: `reconciliado` — apenas salva o CODPARC existente no Supabase, sem criar novo parceiro
+Antes de qualquer criação, a função consulta TGFPAR pelo `CGC_CPF` (com e sem máscara). O resultado determina a ação:
 
-### Fluxo completo por cliente
+| Situação | Ação | Resultado |
+|---|---|---|
+| CPF encontrado no Sankhya | `reconciliado` | Salva CODPARC existente no Supabase, sem criar novo parceiro |
+| CPF não encontrado + **tem pedido** | `criado` | POST `/v1/parceiros/clientes` → salva `codigoCliente` |
+| CPF não encontrado + **sem pedido** | `ignorado` | Nenhuma ação — não cria cadastro sem histórico de compra |
+
+### Fluxo completo
 
 ```
-1. Busca clientes elegíveis (PF + sem codparc + com pedido)
+1. Busca TODOS os clientes PF com codparc IS NULL (LEFT JOIN em pedido)
 2. Para cada cliente (lotes de 5 em paralelo):
-   a. loadRecords TGFPAR → busca por CPF
-   b. Se encontrado → reconcilia codparc no Supabase
-   c. Se não encontrado → POST /v1/parceiros/clientes → salva codigoCliente
+   a. loadRecords TGFPAR → busca por CPF (com e sem máscara)
+   b. Se encontrado → reconcilia codparc (evita duplicidade no ERP)
+   c. Se não encontrado e tem pedido → POST /v1/parceiros/clientes
+   d. Se não encontrado e sem pedido → ignora
 3. Loga resultado em log_sincronizacao (entidade='cliente')
 ```
 
@@ -367,20 +374,115 @@ O script Python anterior (`TGSPAR.py`) enviava dados para uma tabela intermediá
 
 ---
 
-## 8. Entidade: Pedido *(planejado)*
+## 8. Entidade: Pedido
 
+### Tabelas Sankhya: `TGFCAB` (cabeçalho) + `TGFITE` (itens) — via REST API
 ### Tabelas Supabase: `public.pedido` + `public.pedido_item`
+### Edge Function: `integrar-pedidos` | Cron: **sem cron** (disparo manual em fase de desenvolvimento)
 
-| Campo Supabase | Campo Sankhya | Observação |
+> **Direção:** Supabase → Sankhya (outbound). Pedidos realizados no e-commerce são enviados ao ERP para faturamento.
+
+### Configurações fixas (regras obrigatórias do projeto)
+
+| Constante | Valor | Descrição |
 |---|---|---|
-| `pedido.id` | — | ID interno do Supabase |
-| `pedido.nunota` | `NUNOTA` | Preenchido após integração com Sankhya |
-| `pedido.cliente_id` | — | UUID do cliente no Supabase |
-| `pedido_item.codprod` | `CODPROD` | FK para produto |
-| `pedido_item.quantidade` | `QTDNEG` | Quantidade negociada |
-| `pedido_item.vlr_unitario` | `VLRUNIT` | Valor unitário |
+| `notaModelo` | `1006` | TOP (Tipo de Operação) para pedidos do e-commerce |
+| `codigoVendedor` | `6` | Vendedor padrão para todos os pedidos do site |
+| `codigoEmpresa` | `2` | CODEMP Sankhya |
 
-**Endpoint Sankhya:** `loadRecords` na entidade `CabecalhoNota` (TGFCAB)
+### Mapeamento metodo_pagamento → codTipVenda
+
+| `pedido.metodo_pagamento` | `codTipVenda` Sankhya |
+|---|---|
+| `boleto` | `87` |
+| `cartao` / `cartão` | `86` |
+| `pix` | `140` |
+
+### Endpoints utilizados
+
+| Método | Endpoint | Finalidade |
+|---|---|---|
+| `POST` | `/v1/vendas/pedidos` | Cria pedido de venda (TGFCAB + TGFITE) |
+| `POST` | `/v1/vendas/pedidos/{nunota}/cancela` | Cancela pedido no Sankhya |
+| `GET` | `/v1/vendas/pedidos` | Consulta pedidos (não utilizado no sync, referência) |
+
+### Critérios de elegibilidade (rota batch)
+- `pedido.status = 'pago'`
+- `pedido.nunota IS NULL` — ainda não integrado ao Sankhya
+- `cliente.codparc` preenchido (dependência de `integrar-clientes`)
+
+### Mapeamento Supabase → Sankhya (POST body)
+
+```json
+{
+  "notaModelo":     1006,
+  "data":           "DD/MM/AAAA (de pedido.dt_pedido)",
+  "hora":           "HH:MM:SS  (de pedido.dt_pedido)",
+  "codigoVendedor": 6,
+  "codigoCliente":  "cliente.codparc",
+  "valorTotal":     "pedido.vlr_total",
+  "valorFrete":     "pedido.vlr_frete (omitido se nulo ou zero)",
+  "itens": [{
+    "codigoProduto": "pedido_item.codprod",
+    "quantidade":    "pedido_item.quantidade",
+    "valorUnitario": "pedido_item.vlr_unitario"
+  }],
+  "financeiros": [{
+    "codTipVenda": "<mapeado de metodo_pagamento>",
+    "valor":       "pedido.vlr_total"
+  }]
+}
+```
+
+### Response do POST e atualização do Supabase
+
+| Campo Response | Campo Supabase | Observação |
+|---|---|---|
+| `codigoNota` / `nunota` / `codigoPedido` | `pedido.nunota` | NUNOTA gerado pelo Sankhya — a função aceita qualquer um dos três nomes |
+
+### Fluxo completo por pedido
+
+| Situação | Ação |
+|---|---|
+| `metodo_pagamento` não mapeado | `sem_pagamento` — registra erro em `pedido.log_erro_integracao`, não tenta |
+| `cliente.codparc` ausente | `sem_codparc` — aguarda `integrar-clientes` reconciliar antes de nova tentativa |
+| POST Sankhya com sucesso | `integrado` — salva `nunota`, muda `status → 'integrado'`, limpa `log_erro_integracao` |
+| Erro na API Sankhya | `erro` — salva mensagem em `pedido.log_erro_integracao` e em `log_integracao_pedido` |
+
+```
+1. Busca pedidos elegíveis (status='pago' + nunota IS NULL)
+2. Para cada pedido (série, lotes de 3):
+   a. Valida metodo_pagamento → codTipVenda
+   b. Busca cliente.codparc — se ausente, marca sem_codparc e avança
+   c. Busca itens do pedido (pedido_item)
+   d. POST /v1/vendas/pedidos → recebe nunota
+   e. Atualiza pedido.nunota, pedido.status='integrado'
+   f. Registra em log_integracao_pedido (payload + resposta)
+3. Loga resultado em log_sincronizacao (entidade='pedido')
+```
+
+### Rota de cancelamento
+
+```
+POST /functions/v1/integrar-pedidos/cancelar
+Body: { "pedido_id": 123, "motivo": "Cancelamento solicitado" }
+```
+
+- Requer `pedido.nunota` preenchido (pedido já integrado)
+- Chama `POST /v1/vendas/pedidos/{nunota}/cancela` no Sankhya
+- Atualiza `pedido.status → 'cancelado'`
+- Registra em `log_integracao_pedido` com `status='cancelado'`
+
+> **Pedidos faturados** não podem ser cancelados pela API. O Sankhya retornará erro — a função propaga a mensagem.
+
+### Statuses possíveis em `pedido.status`
+
+| Status | Descrição |
+|---|---|
+| `pendente` | Pedido criado, aguardando pagamento |
+| `pago` | Pagamento confirmado — elegível para integração |
+| `integrado` | Enviado ao Sankhya com `nunota` preenchido |
+| `cancelado` | Cancelado via API de cancelamento |
 
 ---
 
@@ -415,6 +517,7 @@ O script Python anterior (`TGSPAR.py`) enviava dados para uma tabela intermediá
 | `sync-produtos-hourly` | `0 * * * *` | Edge Function sync-produtos |
 | `sync-estoque-30min` | `*/30 * * * *` | Edge Function sync-estoque |
 | `integrar-clientes-30min` | `*/30 * * * *` | Edge Function integrar-clientes |
+| `integrar-pedidos` | — | Edge Function integrar-pedidos — **sem cron** (disparo manual; fase de desenvolvimento) |
 | `sync-precos-daily` | `0 1 * * *` | Edge Function sync-precos |
 | `sync-especificacoes-daily` | `0 2 * * *` | Edge Function sync-especificacoes |
 | `sync-categorias-daily` | `0 3 * * *` | Edge Function sync-categorias |
