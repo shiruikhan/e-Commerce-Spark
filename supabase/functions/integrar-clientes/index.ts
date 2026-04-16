@@ -32,7 +32,7 @@ interface EnderecoRow {
 interface ResultadoCliente {
   cliente_id: string;
   cpf:        string;
-  acao:       'criado' | 'reconciliado' | 'erro';
+  acao:       'criado' | 'reconciliado' | 'ignorado' | 'erro';
   codparc?:   number;
   erro?:      string;
 }
@@ -236,7 +236,10 @@ async function criarParceiro(
 }
 
 // ---------------------------------------------------------------------------
-// Processa um cliente: verifica se existe → cria ou reconcilia → atualiza Supabase
+// Processa um cliente:
+//   - Se CPF já existe no Sankhya → reconcilia CODPARC no Supabase
+//   - Se não existe E tem pedido   → cria no Sankhya e salva CODPARC
+//   - Se não existe E sem pedido   → ignora (sem criação para evitar cadastros sem compra)
 // ---------------------------------------------------------------------------
 async function processarCliente(
   token: string,
@@ -244,22 +247,26 @@ async function processarCliente(
   supabase: ReturnType<typeof createClient>,
   cliente: ClienteRow,
   endereco: EnderecoRow | null,
+  temPedido: boolean,
 ): Promise<ResultadoCliente> {
   const cpf = apenasDigitos(cliente.cpf_cnpj);
 
   try {
-    // 1. Verifica se já existe no Sankhya pelo CPF
+    // 1. Verifica se já existe no Sankhya pelo CPF/CNPJ
     const codparcExistente = await buscarCodparcPorCpf(token, apiBase, cpf);
 
     let codparc: number;
-    let acao: 'criado' | 'reconciliado';
+    let acao: 'criado' | 'reconciliado' | 'ignorado';
 
     if (codparcExistente !== null) {
-      // Já existe — apenas reconcilia o CODPARC no Supabase
+      // Já existe no Sankhya — reconcilia para evitar duplicidade
       codparc = codparcExistente;
       acao    = 'reconciliado';
+    } else if (!temPedido) {
+      // Não existe no Sankhya e não realizou compra — não sobe cadastro
+      return { cliente_id: cliente.id, cpf, acao: 'ignorado' };
     } else {
-      // Não existe — cria no Sankhya
+      // Não existe no Sankhya E tem pedido — cria o cadastro
       codparc = await criarParceiro(token, apiBase, cliente, endereco);
       acao    = 'criado';
     }
@@ -300,26 +307,28 @@ Deno.serve(async (_req: Request) => {
   const logId = logRow.id;
 
   try {
-    // Clientes elegíveis:
-    //  - PF: cpf_cnpj com 11 dígitos (após sanitização)
-    //  - Sem CODPARC (não integrados ainda)
-    //  - Com pelo menos 1 pedido realizado
+    // Busca TODOS os clientes PF sem codparc para:
+    //   a) reconciliar com Sankhya se o CPF já existir lá (evita duplicidade)
+    //   b) criar no Sankhya apenas os que fizeram compra no site
+    // Usa LEFT JOIN em pedido para detectar se houve compra sem excluir clientes sem pedido.
     const { data: clientesRaw, error: cliErr } = await supabase
       .from('cliente')
       .select(`
         id, nome, cpf_cnpj, email, telefone,
-        pedido!inner(id),
+        pedido(id),
         endereco(cep, logradouro, numero, complemento, bairro, cidade, uf, is_padrao)
       `)
       .is('codparc', null);
 
     if (cliErr) throw new Error(`Falha ao buscar clientes: ${cliErr.message}`);
 
-    // Filtra apenas PF (CPF = 11 dígitos) e com pedido
-    const clientes = (clientesRaw ?? []).filter(c => {
-      const cpf = apenasDigitos(c.cpf_cnpj);
-      return cpf.length === 11;
-    });
+    // Filtra apenas PF (CPF = 11 dígitos) e enriquece com flag de pedido
+    const clientes = (clientesRaw ?? [])
+      .filter(c => apenasDigitos(c.cpf_cnpj).length === 11)
+      .map(c => ({
+        ...c,
+        temPedido: Array.isArray(c.pedido) ? c.pedido.length > 0 : !!c.pedido,
+      }));
 
     const total = clientes.length;
 
@@ -368,7 +377,7 @@ Deno.serve(async (_req: Request) => {
             uf:          endPadrao.uf,
           } : null;
 
-          return processarCliente(token, apiBase, supabase, clienteRow, enderecoRow);
+          return processarCliente(token, apiBase, supabase, clienteRow, enderecoRow, c.temPedido);
         }),
       );
 
@@ -377,6 +386,7 @@ Deno.serve(async (_req: Request) => {
 
     const criados       = resultados.filter(r => r.acao === 'criado').length;
     const reconciliados = resultados.filter(r => r.acao === 'reconciliado').length;
+    const ignorados     = resultados.filter(r => r.acao === 'ignorado').length;
     const erros         = resultados.filter(r => r.acao === 'erro');
     const totalOk       = criados + reconciliados;
 
@@ -402,6 +412,7 @@ Deno.serve(async (_req: Request) => {
       total_elegiveis: total,
       criados,
       reconciliados,
+      ignorados,
       erros: erros.length,
       detalhes_erros: erros.map(e => ({ cpf: e.cpf, erro: e.erro })),
       tempo_ms: Date.now() - startTime,
