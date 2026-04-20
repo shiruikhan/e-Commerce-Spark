@@ -21,8 +21,8 @@ O sistema mantém o catálogo do e-commerce sincronizado com o Sankhya e orquest
 ### Fluxo de Entrada (Sankhya → Supabase) — via pg_cron + Edge Functions
 Produtos, categorias, estoque e preços são sincronizados periodicamente do Sankhya para o Supabase. **As Edge Functions são estritamente leitura no Sankhya — nenhum dado é escrito de volta ao ERP.**
 
-### Fluxo de Saída (E-commerce → Supabase → Sankhya) — planejado
-Pedidos criados no React são persistidos no Supabase e enviados ao Sankhya via Edge Function, que retorna o `nunota` para faturamento.
+### Fluxo de Saída (E-commerce → Supabase → Sankhya)
+Clientes e pedidos criados no e-commerce são integrados ao Sankhya via Edge Functions. `integrar-clientes` reconcilia/cria parceiros (TGFPAR) e `integrar-pedidos` envia pedidos (TGFCAB+TGFITE) retornando o `nunota` para faturamento.
 
 ---
 
@@ -61,8 +61,11 @@ Para o mapeamento de campos Sankhya ↔ Supabase, consulte [`docs/MAPPING.md`](d
 | `sync-produtos` | false | pg_cron | Sincroniza produtos com `AD_SYNCSITE='S'` do Sankhya |
 | `sync-categorias` | false | pg_cron | Sincroniza grupos de produto (TGFGRU) com ordenação topológica |
 | `sync-estoque` | false | pg_cron | Sincroniza estoque real (TGFEST, CODEMP=1, CODLOCAL=109) |
-| `sync-precos` | false | pg_cron | Sincroniza preços da tabela 201 (TGFPRC) |
-| `test-sankhya-auth` | true | Manual | Valida conectividade e secrets com a API Sankhya |
+| `sync-precos` | false | pg_cron | Sincroniza preços da tabela 201 via REST por produto |
+| `sync-especificacoes` | false | pg_cron | Sincroniza especificações customizadas (AD_PROESP) |
+| `integrar-clientes` | false | pg_cron | Reconcilia/cria clientes PF no Sankhya (TGFPAR) |
+| `integrar-pedidos` | false | Manual | Envia pedidos pagos ao Sankhya (TGFCAB+TGFITE) |
+| `test-sankhya-auth` | true | Manual | Valida secrets e conectividade OAuth com a API Sankhya; retorna preview mascarado dos valores |
 
 Todas as funções de sync registram execução em `log_sincronizacao`. O código-fonte está em `supabase/functions/`.
 

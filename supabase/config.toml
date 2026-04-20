@@ -2,7 +2,7 @@
 # Ref: https://supabase.com/docs/guides/cli/config
 
 [project]
-project_id = "dafsaudqocbznvvvtojy"
+project_id = "obbymrwivuhjopwnmoxx"
 
 [functions.sync-produtos]
 verify_jwt = false   # chamada pelo pg_cron (sem JWT de usuário)

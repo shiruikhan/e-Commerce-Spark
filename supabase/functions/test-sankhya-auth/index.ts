@@ -7,6 +7,12 @@ const REQUIRED_SECRETS = [
   'SANKHYA_AUTH_URL',
 ] as const;
 
+function mask(value: string): string {
+  const trimmed = value.trim();
+  if (trimmed.length <= 8) return `${'*'.repeat(trimmed.length)} (${trimmed.length} chars)`;
+  return `${trimmed.slice(0, 4)}...${ trimmed.slice(-4)} (${trimmed.length} chars, trimmed=${trimmed.length !== value.length})`;
+}
+
 Deno.serve(async (req: Request) => {
   if (req.method !== 'GET') {
     return json({ error: 'Use GET' }, 405);
@@ -14,12 +20,16 @@ Deno.serve(async (req: Request) => {
 
   const report: Record<string, unknown> = {};
 
-  // --- 1. Verificar presença dos secrets ---
+  // --- 1. Verificar presença e preview dos secrets ---
   const secretsCheck: Record<string, boolean> = {};
+  const secretsPreview: Record<string, string> = {};
   for (const key of REQUIRED_SECRETS) {
-    secretsCheck[key] = !!Deno.env.get(key);
+    const val = Deno.env.get(key) ?? '';
+    secretsCheck[key]   = val.length > 0;
+    secretsPreview[key] = val.length > 0 ? mask(val) : '(vazio)';
   }
-  report.secrets = secretsCheck;
+  report.secrets         = secretsCheck;
+  report.secrets_preview = secretsPreview;
 
   const missingSecrets = REQUIRED_SECRETS.filter(k => !secretsCheck[k]);
   if (missingSecrets.length > 0) {
@@ -32,16 +42,20 @@ Deno.serve(async (req: Request) => {
   }
 
   // --- 2. Autenticar via OAuth 2.0 Client Credentials ---
-  const authUrl      = Deno.env.get('SANKHYA_AUTH_URL')!;
-  const clientId     = Deno.env.get('SANKHYA_CLIENT_ID')!;
-  const clientSecret = Deno.env.get('SANKHYA_CLIENT_SECRET')!;
-  const xToken       = Deno.env.get('SANKHYA_X_TOKEN')!;
+  const authUrl      = Deno.env.get('SANKHYA_AUTH_URL')!.trim();
+  const clientId     = Deno.env.get('SANKHYA_CLIENT_ID')!.trim();
+  const clientSecret = Deno.env.get('SANKHYA_CLIENT_SECRET')!.trim();
+  const xToken       = Deno.env.get('SANKHYA_X_TOKEN')!.trim();
 
   const formBody = new URLSearchParams({
     grant_type:    'client_credentials',
     client_id:     clientId,
     client_secret: clientSecret,
   });
+
+  report.request_url     = authUrl;
+  report.request_headers = { 'Content-Type': 'application/x-www-form-urlencoded', 'X-Token': mask(xToken) };
+  report.request_body    = `grant_type=client_credentials&client_id=${mask(clientId)}&client_secret=${mask(clientSecret)}`;
 
   let authOk = false;
   try {
