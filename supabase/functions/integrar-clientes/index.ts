@@ -93,73 +93,19 @@ function parseTelefone(tel: string | null): { ddd: string; numero: string } | nu
 }
 
 // ---------------------------------------------------------------------------
-// Verifica se CPF já existe no Sankhya via loadRecords (TGFPAR)
+// Verifica se CPF já existe no espelho local da tabela parceiro
 // ---------------------------------------------------------------------------
 async function buscarCodparcPorCpf(
-  token: string,
-  apiBase: string,
+  supabase: ReturnType<typeof createClient>,
   cpfDigitos: string,
 ): Promise<number | null> {
-  const url = `${apiBase}/gateway/v1/mge/service.sbr?serviceName=CRUDServiceProvider.loadRecords&outputType=json`;
-
-  // Tenta primeiro com CPF formatado, depois com dígitos puros
-  for (const cpfBusca of [formatarCpf(cpfDigitos), cpfDigitos]) {
-    const body = {
-      serviceName: 'CRUDServiceProvider.loadRecords',
-      requestBody: {
-        dataSet: {
-          rootEntity: 'Parceiro',
-          ignoreCalculatedFields: 'true',
-          offsetPage: '0',
-          limitPag: '1',
-          criteria: {
-            expression: 'THIS.CGC_CPF = ?',
-            parameter: [{ value: cpfBusca, type: 'S' }],
-          },
-          entity: [{ path: '', fieldset: { list: 'CODPARC,CGC_CPF' } }],
-        },
-      },
-    };
-
-    const ctrl = new AbortController();
-    const tid  = setTimeout(() => ctrl.abort(), HTTP_TIMEOUT_MS);
-    try {
-      const res = await fetch(url, {
-        method: 'POST',
-        headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
-        body: JSON.stringify(body),
-        signal: ctrl.signal,
-      });
-      if (!res.ok) {
-        console.error(`[buscarCodparc] HTTP ${res.status} para CPF ${cpfBusca}: ${await res.text()}`);
-        continue;
-      }
-
-      const data = await res.json();
-      if (data.status !== '1' && data.status !== 1) {
-        console.warn(`[buscarCodparc] status não-1 para CPF ${cpfBusca}:`, JSON.stringify(data.statusMessage ?? data.error ?? ''));
-        continue;
-      }
-
-      const entities = data?.responseBody?.entities;
-      const rawList  = Array.isArray(entities?.entity) ? entities.entity : (entities?.entity ? [entities.entity] : []);
-      console.log(`[buscarCodparc] CPF ${cpfBusca} → ${rawList.length} registro(s)`);
-      if (!rawList.length) continue;
-
-      const fields: Array<{ name: string }> = entities?.metadata?.fields?.field ?? [];
-      const idx: Record<string, number> = {};
-      fields.forEach((f: { name: string }, i: number) => { idx[f.name] = i; });
-
-      const first = rawList[0] as Record<string, { $?: unknown }>;
-      const codparcVal = first[`f${idx['CODPARC']}`]?.$ ?? null;
-      console.log(`[buscarCodparc] CODPARC encontrado: ${codparcVal}`);
-      if (codparcVal !== null) return Number(codparcVal);
-    } finally {
-      clearTimeout(tid);
-    }
-  }
-
-  return null;
+  const cpfFormatado = formatarCpf(cpfDigitos);
+  const { data } = await supabase
+    .from('parceiro')
+    .select('codparc')
+    .or(`cgc_cpf.eq.${cpfDigitos},cgc_cpf.eq.${cpfFormatado}`)
+    .maybeSingle();
+  return data?.codparc ?? null;
 }
 
 
@@ -200,10 +146,10 @@ async function criarParceiro(
   const fone         = parseTelefone(cliente.telefone);
   const cepLimpo     = apenasDigitos(endereco?.cep);
 
-  const codigolbge = (endereco?.uf && endereco?.cidade)
+  const codigoIbge = (endereco?.uf && endereco?.cidade)
     ? await buscarCodigoIbge(endereco.uf, endereco.cidade)
     : null;
-  if (!codigolbge) throw new Error(`Código IBGE não encontrado para ${endereco?.cidade}/${endereco?.uf}`);
+  if (!codigoIbge) throw new Error(`Código IBGE não encontrado para ${endereco?.cidade}/${endereco?.uf}`);
 
   const enderecoPayload: Record<string, unknown> = {
     logradouro: endereco!.logradouro,
@@ -212,8 +158,8 @@ async function criarParceiro(
     cidade:     endereco!.cidade,
     uf:         endereco!.uf,
     cep:        cepLimpo,
+    codigoIbge,
   };
-  enderecoPayload['codigoIbge'] = codigolbge;
   if (endereco?.complemento) enderecoPayload['complemento'] = endereco.complemento;
 
   const payload: Record<string, unknown> = {
@@ -229,7 +175,7 @@ async function criarParceiro(
     payload['telefoneDdd']    = fone.ddd;
     payload['telefoneNumero'] = fone.numero;
   }
-  if (Object.keys(enderecoPayload).length > 0) payload['endereco'] = enderecoPayload;
+  payload['endereco'] = enderecoPayload;
 
   const ctrl = new AbortController();
   const tid  = setTimeout(() => ctrl.abort(), HTTP_TIMEOUT_MS);
@@ -314,8 +260,8 @@ async function processarCliente(
       return { cliente_id: cliente.id, cpf, acao: 'endereco_incompleto', erro: msg };
     }
 
-    // 2. Verifica se já existe no Sankhya pelo CPF
-    const codparcExistente = await buscarCodparcPorCpf(token, apiBase, cpf);
+    // 2. Verifica se já existe no espelho local pelo CPF
+    const codparcExistente = await buscarCodparcPorCpf(supabase, cpf);
 
     let codparc: number;
     let acao: 'criado' | 'reconciliado' | 'ignorado';
@@ -330,7 +276,7 @@ async function processarCliente(
       acao    = 'criado';
     }
 
-    // 2. Atualiza codparc + status no Supabase
+    // 3. Atualiza codparc + status no Supabase
     const { error: updErr } = await supabase
       .from('cliente')
       .update({ codparc, integracao_status: 'integrado', integracao_erro: null })
