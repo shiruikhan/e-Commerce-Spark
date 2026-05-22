@@ -157,35 +157,55 @@ async function buscarCodparcPorCpf(
 
 // ---------------------------------------------------------------------------
 // Cria parceiro no Sankhya via REST POST /v1/parceiros/clientes
-// Envia endereço como strings (fluxo normal de cadastro); Sankhya
-// resolve bairro/cidade pelo nome nas tabelas TGFBAI/TGFCID.
 // ---------------------------------------------------------------------------
 async function criarParceiro(
   token: string,
   apiBase: string,
   cliente: ClienteRow,
   endereco: EnderecoRow | null,
+  supabase: ReturnType<typeof createClient>,
 ): Promise<number> {
   const cpfFormatado = formatarCpf(apenasDigitos(cliente.cpf_cnpj));
   const fone         = parseTelefone(cliente.telefone);
   const cepLimpo     = apenasDigitos(endereco?.cep);
 
+  // Busca codibge na tabela local para montar codigolbge (obrigatório na API)
+  let codigolbge: string | null = null;
+  if (endereco?.cidade) {
+    const { data: cidadeRow } = await supabase
+      .from('cidade')
+      .select('codibge')
+      .ilike('nomecid', endereco.cidade.trim())
+      .not('codibge', 'is', null)
+      .limit(1)
+      .maybeSingle();
+    if (cidadeRow?.codibge) codigolbge = String(cidadeRow.codibge);
+  }
+
+  const enderecoPayload: Record<string, unknown> = {};
+  if (endereco?.logradouro)  enderecoPayload['logradouro']  = endereco.logradouro;
+  if (endereco?.numero)      enderecoPayload['numero']       = endereco.numero;
+  if (endereco?.complemento) enderecoPayload['complemento'] = endereco.complemento;
+  if (endereco?.bairro)      enderecoPayload['bairro']       = endereco.bairro;
+  if (endereco?.cidade)      enderecoPayload['cidade']       = endereco.cidade;
+  if (codigolbge)            enderecoPayload['codigolbge']   = codigolbge;
+  if (endereco?.uf)          enderecoPayload['uf']           = endereco.uf;
+  if (cepLimpo)              enderecoPayload['cep']          = cepLimpo;
+
   const payload: Record<string, unknown> = {
-    nome:       cliente.nome.toUpperCase(),
-    cpfCnpj:   cpfFormatado,
-    tipoPessoa: 'F',
-    cliente:    true,
+    tipo:     'PF',
+    cnpjCpf:  cpfFormatado,
+    ieRg:     '',
+    nome:     cliente.nome.toUpperCase(),
+    contatos: [],
   };
 
-  if (cliente.email)         payload['email']       = cliente.email;
-  if (fone)                  payload['telefone']    = `(${fone.ddd})${fone.numero}`;
-  if (cepLimpo)              payload['cep']         = cepLimpo;
-  if (endereco?.logradouro)  payload['logradouro']  = endereco.logradouro;
-  if (endereco?.numero)      payload['numero']      = endereco.numero;
-  if (endereco?.complemento) payload['complemento'] = endereco.complemento;
-  if (endereco?.bairro)      payload['bairro']      = endereco.bairro;
-  if (endereco?.cidade)      payload['cidade']      = endereco.cidade;
-  if (endereco?.uf)          payload['uf']          = endereco.uf;
+  if (cliente.email) payload['email'] = cliente.email;
+  if (fone) {
+    payload['telefoneDdd']    = fone.ddd;
+    payload['telefoneNumero'] = fone.numero;
+  }
+  if (Object.keys(enderecoPayload).length > 0) payload['endereco'] = enderecoPayload;
 
   const ctrl = new AbortController();
   const tid  = setTimeout(() => ctrl.abort(), HTTP_TIMEOUT_MS);
@@ -263,7 +283,7 @@ async function processarCliente(
     } else if (!temPedido) {
       return { cliente_id: cliente.id, cpf, acao: 'ignorado' };
     } else {
-      codparc = await criarParceiro(token, apiBase, cliente, endereco);
+      codparc = await criarParceiro(token, apiBase, cliente, endereco, supabase);
       acao    = 'criado';
     }
 

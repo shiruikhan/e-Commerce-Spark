@@ -182,8 +182,7 @@ async function fetchPagina(
         ignoreCalculatedFields: 'true',
         offsetPage: String(page),
         criteria: {
-          expression: { $: "AD_SYNCSITE = ?" },
-          parameter:  [{ $: 'S', type: 'S' }],
+          expression: { $: "ATIVO = 'S' AND SUBSTR(CODPROD,1,1) = '3'" },
         },
         entity: [{
           path: '',
