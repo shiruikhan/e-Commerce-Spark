@@ -32,7 +32,7 @@ interface EnderecoRow {
 interface ResultadoCliente {
   cliente_id: string;
   cpf:        string;
-  acao:       'criado' | 'reconciliado' | 'ignorado' | 'erro';
+  acao:       'criado' | 'reconciliado' | 'ignorado' | 'erro_permanente' | 'erro';
   codparc?:   number;
   erro?:      string;
 }
@@ -87,13 +87,15 @@ function formatarCpf(cpf: string): string {
   return `${d.slice(0,3)}.${d.slice(3,6)}.${d.slice(6,9)}-${d.slice(9)}`;
 }
 
-/** Extrai DDD e número de uma string de telefone brasileira.
- *  Suporta: "(11) 98765-4321", "11987654321", "+55 11 98765-4321", etc.
- */
+/** Normaliza string para comparação: trim + uppercase */
+function normalizar(s: string | null | undefined): string {
+  return (s ?? '').trim().toUpperCase();
+}
+
+/** Extrai DDD e número de uma string de telefone brasileira */
 function parseTelefone(tel: string | null): { ddd: string; numero: string } | null {
   if (!tel) return null;
   const d = apenasDigitos(tel);
-  // Remove código de país +55
   const sem55 = d.startsWith('55') && d.length >= 12 ? d.slice(2) : d;
   if (sem55.length < 10) return null;
   return { ddd: sem55.slice(0, 2), numero: sem55.slice(2) };
@@ -101,13 +103,11 @@ function parseTelefone(tel: string | null): { ddd: string; numero: string } | nu
 
 // ---------------------------------------------------------------------------
 // Verifica se CPF já existe no Sankhya via loadRecords (TGFPAR)
-// Retorna CODPARC se encontrado, null caso contrário.
-// Busca tanto pelo CPF com máscara quanto sem, para cobrir os dois formatos.
 // ---------------------------------------------------------------------------
 async function buscarCodparcPorCpf(
   token: string,
   apiBase: string,
-  cpf: string,              // apenas dígitos (11 chars)
+  cpf: string,
 ): Promise<number | null> {
   const cpfFormatado = formatarCpf(cpf);
 
@@ -120,7 +120,6 @@ async function buscarCodparcPorCpf(
         offsetPage: '0',
         limitPag: '1',
         criteria: {
-          // Normaliza CGC_CPF removendo pontuação antes de comparar
           expression: { $: "REPLACE(REPLACE(THIS.CGC_CPF, '.', ''), '-', '') = ? OR THIS.CGC_CPF = ?" },
           parameter: [
             { $: cpf,          type: 'S' },
@@ -132,7 +131,7 @@ async function buscarCodparcPorCpf(
     },
   };
 
-  const url = `${apiBase}/gateway/v1/mge/service.sbr?serviceName=CRUDServiceProvider.loadRecords&outputType=json`;
+  const url  = `${apiBase}/gateway/v1/mge/service.sbr?serviceName=CRUDServiceProvider.loadRecords&outputType=json`;
   const ctrl = new AbortController();
   const tid  = setTimeout(() => ctrl.abort(), HTTP_TIMEOUT_MS);
   try {
@@ -145,13 +144,12 @@ async function buscarCodparcPorCpf(
     if (!res.ok) throw new Error(`loadRecords Parceiro falhou: ${res.status} ${await res.text()}`);
 
     const data = await res.json();
-    if (data.status !== '1' && data.status !== 1) return null; // não encontrado = sem erro crítico
+    if (data.status !== '1' && data.status !== 1) return null;
 
     const entities = data?.responseBody?.entities;
     const rawList  = Array.isArray(entities?.entity) ? entities.entity : (entities?.entity ? [entities.entity] : []);
     if (!rawList.length) return null;
 
-    // Parsing posicional
     const fields: Array<{ name: string }> = entities?.metadata?.fields?.field ?? [];
     const idx: Record<string, number> = {};
     fields.forEach((f, i) => { idx[f.name] = i; });
@@ -165,9 +163,106 @@ async function buscarCodparcPorCpf(
 }
 
 // ---------------------------------------------------------------------------
+// Resolve o bairro: busca localmente e, se ausente, cria no Sankhya (TGFBAI)
+// Garante que o bairro exista no ERP antes de tentar criar o parceiro,
+// pois o endpoint POST /v1/parceiros/clientes faz lookup interno por nome.
+// ---------------------------------------------------------------------------
+async function resolverBairro(
+  token: string,
+  apiBase: string,
+  supabase: ReturnType<typeof createClient>,
+  nomebai: string | null,
+  nomecid: string | null,
+  uf: string | null,
+): Promise<void> {
+  if (!nomebai) return; // sem bairro → não há o que resolver
+
+  const nomebaiNorm = normalizar(nomebai);
+
+  // 1. Busca local na tabela bairro (sync de TGFBAI)
+  const { data: encontrado } = await supabase
+    .from('bairro')
+    .select('codbai')
+    .filter('nomebai', 'ilike', nomebai.trim())
+    .limit(1)
+    .maybeSingle();
+
+  if (encontrado) return; // bairro já existe no Sankhya
+
+  // 2. Não existe localmente → busca CODCID pela cidade
+  let codcid: number | null = null;
+
+  if (nomecid && uf) {
+    const { data: cidadeRow } = await supabase
+      .from('cidade')
+      .select('codcid')
+      .filter('nomecid', 'ilike', nomecid.trim())
+      .eq('uf', uf.trim().toUpperCase())
+      .limit(1)
+      .maybeSingle();
+
+    codcid = cidadeRow?.codcid ?? null;
+  }
+
+  // 3. Cria o bairro no Sankhya via saveRecord
+  const localFields: Array<{ name: string; value: { $: string } }> = [
+    { name: 'NOMEBAI', value: { $: nomebaiNorm } },
+  ];
+  if (codcid) {
+    localFields.push({ name: 'CODCID', value: { $: String(codcid) } });
+  }
+
+  const saveBody = {
+    serviceName: 'CRUDServiceProvider.saveRecord',
+    requestBody: {
+      dataSet: {
+        rootEntity: 'Bairro',
+        dataRows: {
+          dataRow: [{ localFields: { localField: localFields } }],
+        },
+      },
+    },
+  };
+
+  const url  = `${apiBase}/gateway/v1/mge/service.sbr?serviceName=CRUDServiceProvider.saveRecord&outputType=json`;
+  const ctrl = new AbortController();
+  const tid  = setTimeout(() => ctrl.abort(), HTTP_TIMEOUT_MS);
+
+  try {
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify(saveBody),
+      signal: ctrl.signal,
+    });
+
+    const data = await res.json();
+    if (!res.ok || (data.status !== '1' && data.status !== 1)) {
+      // Falha ao criar bairro — loga mas não bloqueia; o parceiro pode ser rejeitado
+      // na próxima etapa com mensagem mais clara
+      console.warn(`saveRecord Bairro falhou para "${nomebaiNorm}": ${JSON.stringify(data)}`);
+      return;
+    }
+
+    // 4. Extrai o CODBAI gerado e persiste localmente
+    const codbaiGerado = data?.responseBody?.entities?.entity?.[0]?.key?.CODBAI
+      ?? data?.responseBody?.pk?.CODBAI;
+
+    if (codbaiGerado) {
+      await supabase.from('bairro').upsert(
+        { codbai: Number(codbaiGerado), nomebai: nomebaiNorm, codcid },
+        { onConflict: 'codbai' },
+      );
+    }
+
+  } finally {
+    clearTimeout(tid);
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Cria parceiro no Sankhya via REST API
 // POST /v1/parceiros/clientes
-// Retorna codigoCliente (= CODPARC) gerado pelo ERP.
 // ---------------------------------------------------------------------------
 async function criarParceiro(
   token: string,
@@ -180,17 +275,17 @@ async function criarParceiro(
   const cepLimpo = apenasDigitos(endereco?.cep);
 
   const contato: Record<string, unknown> = {
-    tipo:     'PF',
-    cnpjCpf:  cpf,
-    nome:     cliente.nome,
-    email:    cliente.email ?? undefined,
+    tipo:    'PF',
+    cnpjCpf: cpf,
+    nome:    cliente.nome,
+    email:   cliente.email ?? undefined,
     ...(fone && { telefoneDdd: fone.ddd, telefoneNumero: fone.numero }),
     endereco: {
       cep:         cepLimpo || undefined,
       logradouro:  endereco?.logradouro  ?? '',
       numero:      endereco?.numero      ?? 'S/N',
       complemento: endereco?.complemento ?? undefined,
-      bairro:      endereco?.bairro      ?? '',
+      bairro:      endereco?.bairro      ?? undefined,
       cidade:      endereco?.cidade      ?? '',
       uf:          endereco?.uf          ?? '',
     },
@@ -216,10 +311,9 @@ async function criarParceiro(
 
     if (!res.ok) {
       const msg = (data?.mensagem ?? data?.message ?? JSON.stringify(data)) as string;
-      throw new Error(`POST /v1/parceiros/clientes falhou: ${res.status} — ${msg}`);
+      throw new Error(`POST /v1/parceiros/clientes falhou: ${res.status} — ${JSON.stringify(data?.error ?? msg)}`);
     }
 
-    // O response pode retornar codigoCliente diretamente ou dentro de contatos[0]
     const codigoCliente =
       (data?.codigoCliente as number | undefined) ??
       ((data?.contatos as Array<Record<string,unknown>>)?.[0]?.codigoCliente as number | undefined) ??
@@ -236,10 +330,16 @@ async function criarParceiro(
 }
 
 // ---------------------------------------------------------------------------
-// Processa um cliente:
-//   - Se CPF já existe no Sankhya → reconcilia CODPARC no Supabase
-//   - Se não existe E tem pedido   → cria no Sankhya e salva CODPARC
-//   - Se não existe E sem pedido   → ignora (sem criação para evitar cadastros sem compra)
+// Classifica se um erro HTTP do Sankhya é permanente (400) ou transitório (5xx)
+// Erros permanentes não devem ser retentados automaticamente.
+// ---------------------------------------------------------------------------
+function erroEhPermanente(msg: string): boolean {
+  // HTTP 400 do Sankhya = erro de negócio/dados — não adianta retentar sem corrigir dado
+  return msg.includes('falhou: 400');
+}
+
+// ---------------------------------------------------------------------------
+// Processa um cliente
 // ---------------------------------------------------------------------------
 async function processarCliente(
   token: string,
@@ -252,29 +352,34 @@ async function processarCliente(
   const cpf = apenasDigitos(cliente.cpf_cnpj);
 
   try {
-    // 1. Verifica se já existe no Sankhya pelo CPF/CNPJ
+    // 1. Verifica se já existe no Sankhya pelo CPF
     const codparcExistente = await buscarCodparcPorCpf(token, apiBase, cpf);
 
     let codparc: number;
     let acao: 'criado' | 'reconciliado' | 'ignorado';
 
     if (codparcExistente !== null) {
-      // Já existe no Sankhya — reconcilia para evitar duplicidade
       codparc = codparcExistente;
       acao    = 'reconciliado';
     } else if (!temPedido) {
-      // Não existe no Sankhya e não realizou compra — não sobe cadastro
       return { cliente_id: cliente.id, cpf, acao: 'ignorado' };
     } else {
-      // Não existe no Sankhya E tem pedido — cria o cadastro
+      // Garante que o bairro existe no Sankhya antes de criar o parceiro
+      await resolverBairro(
+        token, apiBase, supabase,
+        endereco?.bairro ?? null,
+        endereco?.cidade ?? null,
+        endereco?.uf     ?? null,
+      );
+
       codparc = await criarParceiro(token, apiBase, cliente, endereco);
       acao    = 'criado';
     }
 
-    // 2. Atualiza codparc no Supabase
+    // 2. Atualiza codparc + status no Supabase
     const { error: updErr } = await supabase
       .from('cliente')
-      .update({ codparc })
+      .update({ codparc, integracao_status: 'integrado', integracao_erro: null })
       .eq('id', cliente.id);
 
     if (updErr) throw new Error(`Falha ao atualizar codparc no Supabase: ${updErr.message}`);
@@ -283,7 +388,23 @@ async function processarCliente(
 
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
-    return { cliente_id: cliente.id, cpf, acao: 'erro', erro: msg };
+    const permanente = erroEhPermanente(msg);
+
+    // Persiste o status de erro para evitar retentativas infinitas em falhas permanentes
+    await supabase
+      .from('cliente')
+      .update({
+        integracao_status: permanente ? 'erro_permanente' : null,
+        integracao_erro:   msg,
+      })
+      .eq('id', cliente.id);
+
+    return {
+      cliente_id: cliente.id,
+      cpf,
+      acao: permanente ? 'erro_permanente' : 'erro',
+      erro: msg,
+    };
   }
 }
 
@@ -307,10 +428,7 @@ Deno.serve(async (_req: Request) => {
   const logId = logRow.id;
 
   try {
-    // Busca TODOS os clientes PF sem codparc para:
-    //   a) reconciliar com Sankhya se o CPF já existir lá (evita duplicidade)
-    //   b) criar no Sankhya apenas os que fizeram compra no site
-    // Usa LEFT JOIN em pedido para detectar se houve compra sem excluir clientes sem pedido.
+    // Busca clientes PF sem codparc que ainda não tenham erro permanente
     const { data: clientesRaw, error: cliErr } = await supabase
       .from('cliente')
       .select(`
@@ -318,11 +436,12 @@ Deno.serve(async (_req: Request) => {
         pedido(id),
         endereco(cep, logradouro, numero, complemento, bairro, cidade, uf, is_padrao)
       `)
-      .is('codparc', null);
+      .is('codparc', null)
+      .or('integracao_status.is.null,integracao_status.eq.pendente');
 
     if (cliErr) throw new Error(`Falha ao buscar clientes: ${cliErr.message}`);
 
-    // Filtra apenas PF (CPF = 11 dígitos) e enriquece com flag de pedido
+    // Filtra apenas PF (CPF = 11 dígitos)
     const clientes = (clientesRaw ?? [])
       .filter(c => apenasDigitos(c.cpf_cnpj).length === 11)
       .map(c => ({
@@ -364,7 +483,6 @@ Deno.serve(async (_req: Request) => {
             telefone: c.telefone,
           };
 
-          // Pega o endereço padrão ou o primeiro disponível
           const enderecos = Array.isArray(c.endereco) ? c.endereco : (c.endereco ? [c.endereco] : []);
           const endPadrao = enderecos.find((e: { is_padrao: boolean }) => e.is_padrao) ?? enderecos[0] ?? null;
           const enderecoRow: EnderecoRow | null = endPadrao ? {
@@ -384,23 +502,27 @@ Deno.serve(async (_req: Request) => {
       resultados.push(...loteResultados);
     }
 
-    const criados       = resultados.filter(r => r.acao === 'criado').length;
-    const reconciliados = resultados.filter(r => r.acao === 'reconciliado').length;
-    const ignorados     = resultados.filter(r => r.acao === 'ignorado').length;
-    const erros         = resultados.filter(r => r.acao === 'erro');
-    const totalOk       = criados + reconciliados;
+    const criados          = resultados.filter(r => r.acao === 'criado').length;
+    const reconciliados    = resultados.filter(r => r.acao === 'reconciliado').length;
+    const ignorados        = resultados.filter(r => r.acao === 'ignorado').length;
+    const errosPermanentes = resultados.filter(r => r.acao === 'erro_permanente');
+    const errosTransitorios = resultados.filter(r => r.acao === 'erro');
+    const totalOk          = criados + reconciliados;
+    const totalErros       = errosPermanentes.length + errosTransitorios.length;
 
-    const statusFinal = erros.length > 0 && totalOk === 0
+    const statusFinal = totalErros > 0 && totalOk === 0
       ? 'erro'
       : deadlineAtingido ? 'parcial' : 'sucesso';
+
+    const todosErros = [...errosPermanentes, ...errosTransitorios];
 
     await supabase
       .from('log_sincronizacao')
       .update({
         status: statusFinal,
         registros_processados: totalOk,
-        mensagem_erro: erros.length > 0
-          ? erros.map(e => `[${e.cpf}] ${e.erro}`).join(' | ')
+        mensagem_erro: todosErros.length > 0
+          ? todosErros.map(e => `[${e.cpf}][${e.acao}] ${e.erro}`).join(' | ')
           : null,
         finalizado_em: new Date().toISOString(),
       })
@@ -413,8 +535,9 @@ Deno.serve(async (_req: Request) => {
       criados,
       reconciliados,
       ignorados,
-      erros: erros.length,
-      detalhes_erros: erros.map(e => ({ cpf: e.cpf, erro: e.erro })),
+      erros_permanentes: errosPermanentes.length,
+      erros_transitorios: errosTransitorios.length,
+      detalhes_erros: todosErros.map(e => ({ cpf: e.cpf, acao: e.acao, erro: e.erro })),
       tempo_ms: Date.now() - startTime,
       ...(deadlineAtingido && { aviso: `Deadline atingido. ${total - resultados.length} clientes não processados.` }),
     });

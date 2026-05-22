@@ -20,14 +20,14 @@
 ### Secrets configurados no Supabase
 | Secret | Descrição |
 |---|---|
-| `SANKHYA_AUTH_URL` | URL completa do endpoint de autenticação |
+| `SANKHYA_AUTH_URL` | URL completa do endpoint de autenticação — deve ser `https://api.sankhya.com.br/authenticate` |
 | `SANKHYA_CLIENT_ID` | ID da aplicação no Portal do Desenvolvedor |
 | `SANKHYA_CLIENT_SECRET` | Secret da aplicação |
 | `SANKHYA_X_TOKEN` | Token JWT do gateway — obtido em *Configurações Gateway* no Sankhya Om |
 
 ### Requisição de autenticação
 ```
-POST {SANKHYA_AUTH_URL}
+POST https://api.sankhya.com.br/authenticate
 Content-Type: application/x-www-form-urlencoded
 X-Token: {SANKHYA_X_TOKEN}
 
@@ -51,7 +51,7 @@ grant_type=client_credentials&client_id={SANKHYA_CLIENT_ID}&client_secret={SANKH
 
 | Entidade | Método | Endpoint / Mecanismo | Usado por |
 |---|---|---|---|
-| Auth | POST | `{SANKHYA_AUTH_URL}` | Todas as funções |
+| Auth | POST | `https://api.sankhya.com.br/authenticate` | Todas as funções |
 | Produto | loadRecords | rootEntity: `Produto` (TGFPRO) | `sync-produtos` |
 | Categoria | loadRecords | rootEntity: `GrupoProduto` (TGFGRU) | `sync-categorias` |
 | Estoque | loadRecords | rootEntity: `Estoque` (TGFEST) | `sync-estoque` |
@@ -94,7 +94,7 @@ Campos sem valor retornam `{}` (objeto vazio), não `null`.
 
 ### Erros
 - `data.status !== '1'` indica erro — verificar `data.statusMessage`
-- HTTP 400 na auth pode ser transitório — a função registra o erro em `log_sincronizacao`
+- HTTP 400 na auth indica **URL incorreta** (`SANKHYA_AUTH_URL` deve terminar em `/authenticate`, não `/login`). Verificar a URL antes de suspeitar das credenciais.
 
 ---
 

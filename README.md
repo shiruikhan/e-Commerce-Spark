@@ -77,8 +77,11 @@ Todas as funções de sync registram execução em `log_sincronizacao`. O códig
 |---|---|---|
 | `sync-produtos-hourly` | `0 * * * *` | `sync-produtos` — a cada 1 hora |
 | `sync-estoque-30min` | `*/30 * * * *` | `sync-estoque` — a cada 30 minutos |
-| `sync-precos-daily` | `0 1 * * *` | `sync-precos` — diariamente às 01:00 |
-| `sync-categorias-daily` | `0 3 * * *` | `sync-categorias` — diariamente às 03:00 |
+| `integrar-clientes-30min` | `*/30 * * * *` | `integrar-clientes` — a cada 30 minutos |
+| `sync-precos-daily` | `0 1 * * *` | `sync-precos` — diariamente às 01:00 UTC |
+| `sync-especificacoes-daily` | `0 2 * * *` | `sync-especificacoes` — diariamente às 02:00 UTC |
+| `sync-categorias-daily` | `0 3 * * *` | `sync-categorias` — diariamente às 03:00 UTC |
+| `log-sincronizacao-cleanup` | `0 4 * * 1` | Limpeza de `log_sincronizacao` > 60 dias — toda segunda às 04:00 UTC |
 
 ---
 
@@ -99,14 +102,14 @@ Configure os seguintes secrets nas **Edge Function Secrets** do Supabase (nunca 
 
 ```bash
 # Testar autenticação com o Sankhya
-curl -X GET https://dafsaudqocbznvvvtojy.supabase.co/functions/v1/test-sankhya-auth \
+curl -X GET https://obbymrwivuhjopwnmoxx.supabase.co/functions/v1/test-sankhya-auth \
   -H "Authorization: Bearer <SUPABASE_SERVICE_ROLE_KEY>"
 
 # Disparar sync manualmente (todas sem JWT)
-curl -X POST https://dafsaudqocbznvvvtojy.supabase.co/functions/v1/sync-produtos
-curl -X POST https://dafsaudqocbznvvvtojy.supabase.co/functions/v1/sync-categorias
-curl -X POST https://dafsaudqocbznvvvtojy.supabase.co/functions/v1/sync-estoque
-curl -X POST https://dafsaudqocbznvvvtojy.supabase.co/functions/v1/sync-precos
+curl -X POST https://obbymrwivuhjopwnmoxx.supabase.co/functions/v1/sync-produtos
+curl -X POST https://obbymrwivuhjopwnmoxx.supabase.co/functions/v1/sync-categorias
+curl -X POST https://obbymrwivuhjopwnmoxx.supabase.co/functions/v1/sync-estoque
+curl -X POST https://obbymrwivuhjopwnmoxx.supabase.co/functions/v1/sync-precos
 ```
 
 Resposta padrão de sucesso:
