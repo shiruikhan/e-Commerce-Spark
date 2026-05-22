@@ -113,8 +113,8 @@ async function buscarCodparcPorCpf(
           offsetPage: '0',
           limitPag: '1',
           criteria: {
-            expression: { $: 'THIS.CGC_CPF = ?' },
-            parameter: [{ $: cpfBusca, type: 'S' }],
+            expression: 'THIS.CGC_CPF = ?',
+            parameter: [{ value: cpfBusca, type: 'S' }],
           },
           entity: [{ path: '', fieldset: { list: 'CODPARC,CGC_CPF' } }],
         },
@@ -130,13 +130,20 @@ async function buscarCodparcPorCpf(
         body: JSON.stringify(body),
         signal: ctrl.signal,
       });
-      if (!res.ok) continue;
+      if (!res.ok) {
+        console.error(`[buscarCodparc] HTTP ${res.status} para CPF ${cpfBusca}: ${await res.text()}`);
+        continue;
+      }
 
       const data = await res.json();
-      if (data.status !== '1' && data.status !== 1) continue;
+      if (data.status !== '1' && data.status !== 1) {
+        console.warn(`[buscarCodparc] status não-1 para CPF ${cpfBusca}:`, JSON.stringify(data.statusMessage ?? data.error ?? ''));
+        continue;
+      }
 
       const entities = data?.responseBody?.entities;
       const rawList  = Array.isArray(entities?.entity) ? entities.entity : (entities?.entity ? [entities.entity] : []);
+      console.log(`[buscarCodparc] CPF ${cpfBusca} → ${rawList.length} registro(s)`);
       if (!rawList.length) continue;
 
       const fields: Array<{ name: string }> = entities?.metadata?.fields?.field ?? [];
@@ -145,6 +152,7 @@ async function buscarCodparcPorCpf(
 
       const first = rawList[0] as Record<string, { $?: unknown }>;
       const codparcVal = first[`f${idx['CODPARC']}`]?.$ ?? null;
+      console.log(`[buscarCodparc] CODPARC encontrado: ${codparcVal}`);
       if (codparcVal !== null) return Number(codparcVal);
     } finally {
       clearTimeout(tid);
@@ -205,7 +213,7 @@ async function criarParceiro(
     uf:         endereco!.uf,
     cep:        cepLimpo,
   };
-  enderecoPayload['codigolbge'] = codigolbge;
+  enderecoPayload['codigoIbge'] = codigolbge;
   if (endereco?.complemento) enderecoPayload['complemento'] = endereco.complemento;
 
   const payload: Record<string, unknown> = {
