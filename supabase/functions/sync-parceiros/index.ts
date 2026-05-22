@@ -36,8 +36,10 @@ Deno.serve(async (_req: Request) => {
     const apiBase = getApiBase(Deno.env.get('SANKHYA_AUTH_URL')!);
     const url     = `${apiBase}/gateway/v1/mge/service.sbr?serviceName=CRUDServiceProvider.loadRecords&outputType=json`;
 
-    const parceiros: Array<{ codparc: number; cgc_cpf: string | null }> = [];
     let page = 0;
+    let total = 0;
+    const LOTE = 500;
+    let lote: Array<{ codparc: number; cgc_cpf: string | null }> = [];
 
     while (true) {
       const body = {
@@ -77,24 +79,37 @@ Deno.serve(async (_req: Request) => {
         const codparc = Number(row[`f${idx['CODPARC']}`]?.$ ?? 0);
         if (!codparc) continue;
         const cgc_cpf = String(row[`f${idx['CGC_CPF']}`]?.$ ?? '') || null;
-        parceiros.push({ codparc, cgc_cpf });
+        lote.push({ codparc, cgc_cpf });
+      }
+
+      // Upsert incremental a cada LOTE registros para não acumular tudo na memória
+      if (lote.length >= LOTE) {
+        const map = new Map<number, { codparc: number; cgc_cpf: string | null }>();
+        for (const r of lote) map.set(r.codparc, r);
+        const { error } = await supabase
+          .from('parceiro')
+          .upsert(Array.from(map.values()), { onConflict: 'codparc' });
+        if (error) throw new Error(`Upsert parceiro falhou: ${error.message}`);
+        total += map.size;
+        lote = [];
       }
 
       if (entities?.hasMoreResult !== 'true' && entities?.hasMoreResult !== true) break;
       page++;
     }
 
-    if (parceiros.length === 0) return json({ success: true, total: 0 });
-
-    const LOTE = 500;
-    for (let i = 0; i < parceiros.length; i += LOTE) {
+    // Upsert do lote final
+    if (lote.length > 0) {
+      const map = new Map<number, { codparc: number; cgc_cpf: string | null }>();
+      for (const r of lote) map.set(r.codparc, r);
       const { error } = await supabase
         .from('parceiro')
-        .upsert(parceiros.slice(i, i + LOTE), { onConflict: 'codparc' });
+        .upsert(Array.from(map.values()), { onConflict: 'codparc' });
       if (error) throw new Error(`Upsert parceiro falhou: ${error.message}`);
+      total += map.size;
     }
 
-    return json({ success: true, total: parceiros.length });
+    return json({ success: true, total });
 
   } catch (err) {
     return json({ success: false, error: err instanceof Error ? err.message : String(err) }, 500);
