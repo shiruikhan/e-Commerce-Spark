@@ -32,7 +32,7 @@ interface EnderecoRow {
 interface ResultadoCliente {
   cliente_id: string;
   cpf:        string;
-  acao:       'criado' | 'reconciliado' | 'ignorado' | 'erro_permanente' | 'erro';
+  acao:       'criado' | 'reconciliado' | 'ignorado' | 'endereco_incompleto' | 'erro_permanente' | 'erro';
   codparc?:   number;
   erro?:      string;
 }
@@ -156,6 +156,30 @@ async function buscarCodparcPorCpf(
 
 
 // ---------------------------------------------------------------------------
+// Busca código IBGE do município via API pública do IBGE
+// ---------------------------------------------------------------------------
+async function buscarCodigoIbge(uf: string, nomeCidade: string): Promise<string | null> {
+  const ctrl = new AbortController();
+  const tid  = setTimeout(() => ctrl.abort(), HTTP_TIMEOUT_MS);
+  try {
+    const res = await fetch(
+      `https://servicodados.ibge.gov.br/api/v1/localidades/estados/${uf}/municipios`,
+      { signal: ctrl.signal },
+    );
+    if (!res.ok) return null;
+    const municipios: Array<{ id: number; nome: string }> = await res.json();
+    const norm = (s: string) =>
+      s.normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase().trim();
+    const encontrado = municipios.find(m => norm(m.nome) === norm(nomeCidade));
+    return encontrado ? String(encontrado.id) : null;
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(tid);
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Cria parceiro no Sankhya via REST POST /v1/parceiros/clientes
 // ---------------------------------------------------------------------------
 async function criarParceiro(
@@ -163,34 +187,26 @@ async function criarParceiro(
   apiBase: string,
   cliente: ClienteRow,
   endereco: EnderecoRow | null,
-  supabase: ReturnType<typeof createClient>,
 ): Promise<number> {
   const cpfFormatado = formatarCpf(apenasDigitos(cliente.cpf_cnpj));
   const fone         = parseTelefone(cliente.telefone);
   const cepLimpo     = apenasDigitos(endereco?.cep);
 
-  // Busca codibge na tabela local para montar codigolbge (obrigatório na API)
-  let codigolbge: string | null = null;
-  if (endereco?.cidade) {
-    const { data: cidadeRow } = await supabase
-      .from('cidade')
-      .select('codibge')
-      .ilike('nomecid', endereco.cidade.trim())
-      .not('codibge', 'is', null)
-      .limit(1)
-      .maybeSingle();
-    if (cidadeRow?.codibge) codigolbge = String(cidadeRow.codibge);
-  }
+  const codigolbge = (endereco?.uf && endereco?.cidade)
+    ? await buscarCodigoIbge(endereco.uf, endereco.cidade)
+    : null;
+  if (!codigolbge) throw new Error(`Código IBGE não encontrado para ${endereco?.cidade}/${endereco?.uf}`);
 
-  const enderecoPayload: Record<string, unknown> = {};
-  if (endereco?.logradouro)  enderecoPayload['logradouro']  = endereco.logradouro;
-  if (endereco?.numero)      enderecoPayload['numero']       = endereco.numero;
+  const enderecoPayload: Record<string, unknown> = {
+    logradouro: endereco!.logradouro,
+    numero:     endereco!.numero,
+    bairro:     endereco!.bairro,
+    cidade:     endereco!.cidade,
+    uf:         endereco!.uf,
+    cep:        cepLimpo,
+  };
+  enderecoPayload['codigolbge'] = codigolbge;
   if (endereco?.complemento) enderecoPayload['complemento'] = endereco.complemento;
-  if (endereco?.bairro)      enderecoPayload['bairro']       = endereco.bairro;
-  if (endereco?.cidade)      enderecoPayload['cidade']       = endereco.cidade;
-  if (codigolbge)            enderecoPayload['codigolbge']   = codigolbge;
-  if (endereco?.uf)          enderecoPayload['uf']           = endereco.uf;
-  if (cepLimpo)              enderecoPayload['cep']          = cepLimpo;
 
   const payload: Record<string, unknown> = {
     tipo:     'PF',
@@ -271,7 +287,26 @@ async function processarCliente(
   const cpf = apenasDigitos(cliente.cpf_cnpj);
 
   try {
-    // 1. Verifica se já existe no Sankhya pelo CPF
+    // 1. Valida campos obrigatórios do endereço antes de qualquer chamada à API
+    //    POST /v1/parceiros/clientes exige endereco completo; campo ausente = erro 400 no Sankhya
+    const camposFaltando: string[] = [];
+    if (!endereco?.logradouro) camposFaltando.push('logradouro');
+    if (!endereco?.numero)     camposFaltando.push('numero');
+    if (!endereco?.bairro)     camposFaltando.push('bairro');
+    if (!endereco?.cidade)     camposFaltando.push('cidade');
+    if (!endereco?.uf)         camposFaltando.push('uf');
+    if (!apenasDigitos(endereco?.cep)) camposFaltando.push('cep');
+
+    if (camposFaltando.length > 0) {
+      const msg = `Endereço incompleto — campos obrigatórios ausentes: ${camposFaltando.join(', ')}`;
+      await supabase
+        .from('cliente')
+        .update({ integracao_status: null, integracao_erro: msg })
+        .eq('id', cliente.id);
+      return { cliente_id: cliente.id, cpf, acao: 'endereco_incompleto', erro: msg };
+    }
+
+    // 2. Verifica se já existe no Sankhya pelo CPF
     const codparcExistente = await buscarCodparcPorCpf(token, apiBase, cpf);
 
     let codparc: number;
@@ -283,7 +318,7 @@ async function processarCliente(
     } else if (!temPedido) {
       return { cliente_id: cliente.id, cpf, acao: 'ignorado' };
     } else {
-      codparc = await criarParceiro(token, apiBase, cliente, endereco, supabase);
+      codparc = await criarParceiro(token, apiBase, cliente, endereco);
       acao    = 'criado';
     }
 
@@ -394,15 +429,16 @@ Deno.serve(async (_req: Request) => {
       resultados.push(...loteResultados);
     }
 
-    const criados           = resultados.filter(r => r.acao === 'criado').length;
-    const reconciliados     = resultados.filter(r => r.acao === 'reconciliado').length;
-    const ignorados         = resultados.filter(r => r.acao === 'ignorado').length;
-    const errosPermanentes  = resultados.filter(r => r.acao === 'erro_permanente');
-    const errosTransitorios = resultados.filter(r => r.acao === 'erro');
-    const totalOk           = criados + reconciliados;
-    const totalErros        = errosPermanentes.length + errosTransitorios.length;
-    const statusFinal       = totalErros > 0 && totalOk === 0 ? 'erro' : deadlineAtingido ? 'parcial' : 'sucesso';
-    const todosErros        = [...errosPermanentes, ...errosTransitorios];
+    const criados              = resultados.filter(r => r.acao === 'criado').length;
+    const reconciliados        = resultados.filter(r => r.acao === 'reconciliado').length;
+    const ignorados            = resultados.filter(r => r.acao === 'ignorado').length;
+    const enderecoIncompleto   = resultados.filter(r => r.acao === 'endereco_incompleto');
+    const errosPermanentes     = resultados.filter(r => r.acao === 'erro_permanente');
+    const errosTransitorios    = resultados.filter(r => r.acao === 'erro');
+    const totalOk              = criados + reconciliados;
+    const totalErros           = errosPermanentes.length + errosTransitorios.length;
+    const statusFinal          = totalErros > 0 && totalOk === 0 ? 'erro' : deadlineAtingido ? 'parcial' : 'sucesso';
+    const todosErros           = [...errosPermanentes, ...errosTransitorios];
 
     await supabase
       .from('log_sincronizacao')
@@ -419,9 +455,11 @@ Deno.serve(async (_req: Request) => {
     return json({
       success: true, status: statusFinal,
       total_elegiveis: total, criados, reconciliados, ignorados,
+      endereco_incompleto: enderecoIncompleto.length,
       erros_permanentes: errosPermanentes.length,
       erros_transitorios: errosTransitorios.length,
       detalhes_erros: todosErros.map(e => ({ cpf: e.cpf, acao: e.acao, erro: e.erro })),
+      detalhes_endereco_incompleto: enderecoIncompleto.map(e => ({ cpf: e.cpf, erro: e.erro })),
       tempo_ms: Date.now() - startTime,
       ...(deadlineAtingido && { aviso: `Deadline atingido. ${total - resultados.length} clientes não processados.` }),
     });
