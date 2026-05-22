@@ -11,6 +11,12 @@ verify_jwt = false   # chamada pelo pg_cron (sem JWT de usuário)
 [functions.sync-estoque]
 verify_jwt = false   # chamada pelo pg_cron (sem JWT de usuário)
 
+[functions.sync-precos]
+verify_jwt = false   # chamada pelo pg_cron (sem JWT de usuário)
+
+[functions.sync-especificacoes]
+verify_jwt = false   # chamada pelo pg_cron (sem JWT de usuário)
+
 [functions.sync-bairros]
 verify_jwt = false   # chamada pelo pg_cron (sem JWT de usuário)
 
