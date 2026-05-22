@@ -1,8 +1,6 @@
 # Supabase project configuration
 # Ref: https://supabase.com/docs/guides/cli/config
 
-[project]
-project_id = "obbymrwivuhjopwnmoxx"
 
 [functions.sync-produtos]
 verify_jwt = false   # chamada pelo pg_cron (sem JWT de usuário)
@@ -11,6 +9,15 @@ verify_jwt = false   # chamada pelo pg_cron (sem JWT de usuário)
 verify_jwt = false   # chamada pelo pg_cron (sem JWT de usuário)
 
 [functions.sync-estoque]
+verify_jwt = false   # chamada pelo pg_cron (sem JWT de usuário)
+
+[functions.sync-bairros]
+verify_jwt = false   # chamada pelo pg_cron (sem JWT de usuário)
+
+[functions.integrar-clientes]
+verify_jwt = false   # chamada pelo pg_cron (sem JWT de usuário)
+
+[functions.integrar-pedidos]
 verify_jwt = false   # chamada pelo pg_cron (sem JWT de usuário)
 
 [functions.test-sankhya-auth]

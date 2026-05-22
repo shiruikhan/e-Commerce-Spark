@@ -119,6 +119,7 @@ async function criarPedidoSankhya(
 
   const payload: Record<string, unknown> = {
     notaModelo:     NOTA_MODELO,
+    codigoEmpresa:  CODIGO_EMPRESA,
     data:           formatarData(pedido.dt_pedido),
     hora:           formatarHora(pedido.dt_pedido),
     codigoVendedor: CODIGO_VENDEDOR,

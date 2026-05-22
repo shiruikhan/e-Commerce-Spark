@@ -63,8 +63,9 @@ Para o mapeamento de campos Sankhya ↔ Supabase, consulte [`docs/MAPPING.md`](d
 | `sync-estoque` | false | pg_cron | Sincroniza estoque real (TGFEST, CODEMP=1, CODLOCAL=109) |
 | `sync-precos` | false | pg_cron | Sincroniza preços da tabela 201 via REST por produto |
 | `sync-especificacoes` | false | pg_cron | Sincroniza especificações customizadas (AD_PROESP) |
-| `integrar-clientes` | false | pg_cron | Reconcilia/cria clientes PF no Sankhya (TGFPAR) |
-| `integrar-pedidos` | false | Manual | Envia pedidos pagos ao Sankhya (TGFCAB+TGFITE) |
+| `sync-bairros` | false | pg_cron | Sincroniza tabelas auxiliares `cidade` (TGFCID) e `bairro` (TGFBAI) — diário às 00:30 UTC |
+| `integrar-clientes` | false | pg_cron | Reconcilia/cria clientes PF no Sankhya (TGFPAR) — pendente fix Sankhya para criação |
+| `integrar-pedidos` | false | pg_cron | Envia pedidos pagos ao Sankhya (TGFCAB+TGFITE), grava `nunota` |
 | `test-sankhya-auth` | true | Manual | Valida secrets e conectividade OAuth com a API Sankhya; retorna preview mascarado dos valores |
 
 Todas as funções de sync registram execução em `log_sincronizacao`. O código-fonte está em `supabase/functions/`.
@@ -75,12 +76,14 @@ Todas as funções de sync registram execução em `log_sincronizacao`. O códig
 
 | Job | Schedule | Edge Function |
 |---|---|---|
-| `sync-produtos-hourly` | `0 * * * *` | `sync-produtos` — a cada 1 hora |
-| `sync-estoque-30min` | `*/30 * * * *` | `sync-estoque` — a cada 30 minutos |
-| `integrar-clientes-30min` | `*/30 * * * *` | `integrar-clientes` — a cada 30 minutos |
+| `sync-bairros-daily` | `30 0 * * *` | `sync-bairros` — diariamente às 00:30 UTC |
 | `sync-precos-daily` | `0 1 * * *` | `sync-precos` — diariamente às 01:00 UTC |
 | `sync-especificacoes-daily` | `0 2 * * *` | `sync-especificacoes` — diariamente às 02:00 UTC |
 | `sync-categorias-daily` | `0 3 * * *` | `sync-categorias` — diariamente às 03:00 UTC |
+| `sync-produtos-hourly` | `0 * * * *` | `sync-produtos` — a cada 1 hora |
+| `sync-estoque-30min` | `*/30 * * * *` | `sync-estoque` — a cada 30 minutos |
+| `integrar-clientes-30min` | `*/30 * * * *` | `integrar-clientes` — a cada 30 minutos |
+| `integrar-pedidos-15min` | `*/15 * * * *` | `integrar-pedidos` — a cada 15 minutos |
 | `log-sincronizacao-cleanup` | `0 4 * * 1` | Limpeza de `log_sincronizacao` > 60 dias — toda segunda às 04:00 UTC |
 
 ---

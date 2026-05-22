@@ -8,6 +8,7 @@ interface CidadeRow {
   codcid:  number;
   nomecid: string;
   uf:      string | null;
+  codibge: number | null;
 }
 
 interface BairroRow {
@@ -135,7 +136,7 @@ async function syncCidades(
   apiBase: string,
   supabase: ReturnType<typeof createClient>,
 ): Promise<number> {
-  const raw = await fetchTodasPaginas(token, apiBase, 'Cidade', 'CODCID,NOMECID,UF');
+  const raw = await fetchTodasPaginas(token, apiBase, 'Cidade', 'CODCID,NOMECID,UF,CODIBGE');
 
   const cidades: CidadeRow[] = [];
   for (const e of raw) {
@@ -144,7 +145,9 @@ async function syncCidades(
     if (!codcid || isNaN(codcid)) continue;
     const nomecid = getField(e, 'NOMECID', fm);
     if (!nomecid) continue;
-    cidades.push({ codcid, nomecid, uf: getField(e, 'UF', fm) });
+    const codibgeRaw = getField(e, 'CODIBGE', fm);
+    const codibge = codibgeRaw ? Number(codibgeRaw) : null;
+    cidades.push({ codcid, nomecid, uf: getField(e, 'UF', fm), codibge: codibge && !isNaN(codibge) ? codibge : null });
   }
 
   if (cidades.length === 0) return 0;

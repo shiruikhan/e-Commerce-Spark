@@ -371,6 +371,9 @@ Deno.serve(async (_req: Request) => {
       totalProcessado = aAtualizar.length;
     }
 
+    // Vincula imagens do storage (ext_product_images → produto_imagem)
+    const { data: imgCount } = await supabase.rpc('sync_produto_imagens');
+
     await supabase
       .from('log_sincronizacao')
       .update({ status: 'sucesso', registros_processados: totalProcessado, finalizado_em: new Date().toISOString() })
@@ -381,6 +384,7 @@ Deno.serve(async (_req: Request) => {
       registros_processados: totalProcessado,
       registros_ignorados:   totalIgnorado,
       embalagens_sincronizadas: codsEmb.length,
+      imagens_vinculadas: imgCount ?? 0,
     });
 
   } catch (err) {

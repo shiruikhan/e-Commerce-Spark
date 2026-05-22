@@ -6,7 +6,7 @@ import { createClient } from "jsr:@supabase/supabase-js@2";
 // ---------------------------------------------------------------------------
 const HTTP_TIMEOUT_MS = 20_000;
 const DEADLINE_MS     = 130_000;
-const BATCH_SIZE      = 5; // escritas no Sankhya — conservador para evitar rate limit
+const BATCH_SIZE      = 5;
 
 // ---------------------------------------------------------------------------
 // Tipos locais
@@ -74,25 +74,16 @@ function getApiBase(authUrl: string): string {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-
-/** Remove tudo que não é dígito */
 function apenasDigitos(s: string | null | undefined): string {
   return (s ?? '').replace(/\D/g, '');
 }
 
-/** Formata CPF com máscara: 12345678900 → 123.456.789-00 */
 function formatarCpf(cpf: string): string {
   const d = apenasDigitos(cpf);
   if (d.length !== 11) return d;
   return `${d.slice(0,3)}.${d.slice(3,6)}.${d.slice(6,9)}-${d.slice(9)}`;
 }
 
-/** Normaliza string para comparação: trim + uppercase */
-function normalizar(s: string | null | undefined): string {
-  return (s ?? '').trim().toUpperCase();
-}
-
-/** Extrai DDD e número de uma string de telefone brasileira */
 function parseTelefone(tel: string | null): { ddd: string; numero: string } | null {
   if (!tel) return null;
   const d = apenasDigitos(tel);
@@ -107,162 +98,67 @@ function parseTelefone(tel: string | null): { ddd: string; numero: string } | nu
 async function buscarCodparcPorCpf(
   token: string,
   apiBase: string,
-  cpf: string,
+  cpfDigitos: string,
 ): Promise<number | null> {
-  const cpfFormatado = formatarCpf(cpf);
+  const url = `${apiBase}/gateway/v1/mge/service.sbr?serviceName=CRUDServiceProvider.loadRecords&outputType=json`;
 
-  const body = {
-    serviceName: 'CRUDServiceProvider.loadRecords',
-    requestBody: {
-      dataSet: {
-        rootEntity: 'Parceiro',
-        ignoreCalculatedFields: 'true',
-        offsetPage: '0',
-        limitPag: '1',
-        criteria: {
-          expression: { $: "REPLACE(REPLACE(THIS.CGC_CPF, '.', ''), '-', '') = ? OR THIS.CGC_CPF = ?" },
-          parameter: [
-            { $: cpf,          type: 'S' },
-            { $: cpfFormatado, type: 'S' },
-          ],
-        },
-        entity: [{ path: '', fieldset: { list: 'CODPARC,CGC_CPF,TIPPESSOA' } }],
-      },
-    },
-  };
-
-  const url  = `${apiBase}/gateway/v1/mge/service.sbr?serviceName=CRUDServiceProvider.loadRecords&outputType=json`;
-  const ctrl = new AbortController();
-  const tid  = setTimeout(() => ctrl.abort(), HTTP_TIMEOUT_MS);
-  try {
-    const res = await fetch(url, {
-      method: 'POST',
-      headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
-      signal: ctrl.signal,
-    });
-    if (!res.ok) throw new Error(`loadRecords Parceiro falhou: ${res.status} ${await res.text()}`);
-
-    const data = await res.json();
-    if (data.status !== '1' && data.status !== 1) return null;
-
-    const entities = data?.responseBody?.entities;
-    const rawList  = Array.isArray(entities?.entity) ? entities.entity : (entities?.entity ? [entities.entity] : []);
-    if (!rawList.length) return null;
-
-    const fields: Array<{ name: string }> = entities?.metadata?.fields?.field ?? [];
-    const idx: Record<string, number> = {};
-    fields.forEach((f, i) => { idx[f.name] = i; });
-
-    const first = rawList[0] as Record<string, { $?: unknown }>;
-    const codparcVal = first[`f${idx['CODPARC']}`]?.$ ?? null;
-    return codparcVal !== null ? Number(codparcVal) : null;
-  } finally {
-    clearTimeout(tid);
-  }
-}
-
-// ---------------------------------------------------------------------------
-// Resolve o bairro: busca localmente e, se ausente, cria no Sankhya (TGFBAI)
-// Garante que o bairro exista no ERP antes de tentar criar o parceiro,
-// pois o endpoint POST /v1/parceiros/clientes faz lookup interno por nome.
-// ---------------------------------------------------------------------------
-async function resolverBairro(
-  token: string,
-  apiBase: string,
-  supabase: ReturnType<typeof createClient>,
-  nomebai: string | null,
-  nomecid: string | null,
-  uf: string | null,
-): Promise<void> {
-  if (!nomebai) return; // sem bairro → não há o que resolver
-
-  const nomebaiNorm = normalizar(nomebai);
-
-  // 1. Busca local na tabela bairro (sync de TGFBAI)
-  const { data: encontrado } = await supabase
-    .from('bairro')
-    .select('codbai')
-    .filter('nomebai', 'ilike', nomebai.trim())
-    .limit(1)
-    .maybeSingle();
-
-  if (encontrado) return; // bairro já existe no Sankhya
-
-  // 2. Não existe localmente → busca CODCID pela cidade
-  let codcid: number | null = null;
-
-  if (nomecid && uf) {
-    const { data: cidadeRow } = await supabase
-      .from('cidade')
-      .select('codcid')
-      .filter('nomecid', 'ilike', nomecid.trim())
-      .eq('uf', uf.trim().toUpperCase())
-      .limit(1)
-      .maybeSingle();
-
-    codcid = cidadeRow?.codcid ?? null;
-  }
-
-  // 3. Cria o bairro no Sankhya via saveRecord
-  const localFields: Array<{ name: string; value: { $: string } }> = [
-    { name: 'NOMEBAI', value: { $: nomebaiNorm } },
-  ];
-  if (codcid) {
-    localFields.push({ name: 'CODCID', value: { $: String(codcid) } });
-  }
-
-  const saveBody = {
-    serviceName: 'CRUDServiceProvider.saveRecord',
-    requestBody: {
-      dataSet: {
-        rootEntity: 'Bairro',
-        dataRows: {
-          dataRow: [{ localFields: { localField: localFields } }],
+  // Tenta primeiro com CPF formatado, depois com dígitos puros
+  for (const cpfBusca of [formatarCpf(cpfDigitos), cpfDigitos]) {
+    const body = {
+      serviceName: 'CRUDServiceProvider.loadRecords',
+      requestBody: {
+        dataSet: {
+          rootEntity: 'Parceiro',
+          ignoreCalculatedFields: 'true',
+          offsetPage: '0',
+          limitPag: '1',
+          criteria: {
+            expression: { $: 'THIS.CGC_CPF = ?' },
+            parameter: [{ $: cpfBusca, type: 'S' }],
+          },
+          entity: [{ path: '', fieldset: { list: 'CODPARC,CGC_CPF' } }],
         },
       },
-    },
-  };
+    };
 
-  const url  = `${apiBase}/gateway/v1/mge/service.sbr?serviceName=CRUDServiceProvider.saveRecord&outputType=json`;
-  const ctrl = new AbortController();
-  const tid  = setTimeout(() => ctrl.abort(), HTTP_TIMEOUT_MS);
+    const ctrl = new AbortController();
+    const tid  = setTimeout(() => ctrl.abort(), HTTP_TIMEOUT_MS);
+    try {
+      const res = await fetch(url, {
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+        signal: ctrl.signal,
+      });
+      if (!res.ok) continue;
 
-  try {
-    const res = await fetch(url, {
-      method: 'POST',
-      headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify(saveBody),
-      signal: ctrl.signal,
-    });
+      const data = await res.json();
+      if (data.status !== '1' && data.status !== 1) continue;
 
-    const data = await res.json();
-    if (!res.ok || (data.status !== '1' && data.status !== 1)) {
-      // Falha ao criar bairro — loga mas não bloqueia; o parceiro pode ser rejeitado
-      // na próxima etapa com mensagem mais clara
-      console.warn(`saveRecord Bairro falhou para "${nomebaiNorm}": ${JSON.stringify(data)}`);
-      return;
+      const entities = data?.responseBody?.entities;
+      const rawList  = Array.isArray(entities?.entity) ? entities.entity : (entities?.entity ? [entities.entity] : []);
+      if (!rawList.length) continue;
+
+      const fields: Array<{ name: string }> = entities?.metadata?.fields?.field ?? [];
+      const idx: Record<string, number> = {};
+      fields.forEach((f: { name: string }, i: number) => { idx[f.name] = i; });
+
+      const first = rawList[0] as Record<string, { $?: unknown }>;
+      const codparcVal = first[`f${idx['CODPARC']}`]?.$ ?? null;
+      if (codparcVal !== null) return Number(codparcVal);
+    } finally {
+      clearTimeout(tid);
     }
-
-    // 4. Extrai o CODBAI gerado e persiste localmente
-    const codbaiGerado = data?.responseBody?.entities?.entity?.[0]?.key?.CODBAI
-      ?? data?.responseBody?.pk?.CODBAI;
-
-    if (codbaiGerado) {
-      await supabase.from('bairro').upsert(
-        { codbai: Number(codbaiGerado), nomebai: nomebaiNorm, codcid },
-        { onConflict: 'codbai' },
-      );
-    }
-
-  } finally {
-    clearTimeout(tid);
   }
+
+  return null;
 }
 
+
 // ---------------------------------------------------------------------------
-// Cria parceiro no Sankhya via REST API
-// POST /v1/parceiros/clientes
+// Cria parceiro no Sankhya via REST POST /v1/parceiros/clientes
+// Envia endereço como strings (fluxo normal de cadastro); Sankhya
+// resolve bairro/cidade pelo nome nas tabelas TGFBAI/TGFCID.
 // ---------------------------------------------------------------------------
 async function criarParceiro(
   token: string,
@@ -270,28 +166,26 @@ async function criarParceiro(
   cliente: ClienteRow,
   endereco: EnderecoRow | null,
 ): Promise<number> {
-  const cpf     = apenasDigitos(cliente.cpf_cnpj);
-  const fone    = parseTelefone(cliente.telefone);
-  const cepLimpo = apenasDigitos(endereco?.cep);
+  const cpfFormatado = formatarCpf(apenasDigitos(cliente.cpf_cnpj));
+  const fone         = parseTelefone(cliente.telefone);
+  const cepLimpo     = apenasDigitos(endereco?.cep);
 
-  const contato: Record<string, unknown> = {
-    tipo:    'PF',
-    cnpjCpf: cpf,
-    nome:    cliente.nome,
-    email:   cliente.email ?? undefined,
-    ...(fone && { telefoneDdd: fone.ddd, telefoneNumero: fone.numero }),
-    endereco: {
-      cep:         cepLimpo || undefined,
-      logradouro:  endereco?.logradouro  ?? '',
-      numero:      endereco?.numero      ?? 'S/N',
-      complemento: endereco?.complemento ?? undefined,
-      bairro:      endereco?.bairro      ?? undefined,
-      cidade:      endereco?.cidade      ?? '',
-      uf:          endereco?.uf          ?? '',
-    },
+  const payload: Record<string, unknown> = {
+    nome:       cliente.nome.toUpperCase(),
+    cpfCnpj:   cpfFormatado,
+    tipoPessoa: 'F',
+    cliente:    true,
   };
 
-  const payload = { contatos: [contato] };
+  if (cliente.email)         payload['email']       = cliente.email;
+  if (fone)                  payload['telefone']    = `(${fone.ddd})${fone.numero}`;
+  if (cepLimpo)              payload['cep']         = cepLimpo;
+  if (endereco?.logradouro)  payload['logradouro']  = endereco.logradouro;
+  if (endereco?.numero)      payload['numero']      = endereco.numero;
+  if (endereco?.complemento) payload['complemento'] = endereco.complemento;
+  if (endereco?.bairro)      payload['bairro']      = endereco.bairro;
+  if (endereco?.cidade)      payload['cidade']      = endereco.cidade;
+  if (endereco?.uf)          payload['uf']          = endereco.uf;
 
   const ctrl = new AbortController();
   const tid  = setTimeout(() => ctrl.abort(), HTTP_TIMEOUT_MS);
@@ -307,34 +201,39 @@ async function criarParceiro(
       signal: ctrl.signal,
     });
 
-    const data = await res.json() as Record<string, unknown>;
+    const rawText = await res.text();
+    let data: Record<string, unknown>;
+    try { data = JSON.parse(rawText); } catch { throw new Error(`POST /v1/parceiros resposta não-JSON: ${rawText.slice(0, 500)}`); }
 
     if (!res.ok) {
-      const msg = (data?.mensagem ?? data?.message ?? JSON.stringify(data)) as string;
-      throw new Error(`POST /v1/parceiros/clientes falhou: ${res.status} — ${JSON.stringify(data?.error ?? msg)}`);
+      throw new Error(`POST /v1/parceiros falhou: ${res.status} — ${rawText.slice(0, 1000)}`);
     }
 
-    const codigoCliente =
-      (data?.codigoCliente as number | undefined) ??
-      ((data?.contatos as Array<Record<string,unknown>>)?.[0]?.codigoCliente as number | undefined) ??
-      ((data?.clientes  as Array<Record<string,unknown>>)?.[0]?.codigoCliente as number | undefined);
+    // O response retorna codigoParceiro, codparc ou id dependendo da versão
+    const codparc =
+      (data?.codigoParceiro as number | undefined) ??
+      (data?.codParc        as number | undefined) ??
+      (data?.codparc        as number | undefined) ??
+      (data?.id             as number | undefined);
 
-    if (!codigoCliente) {
-      throw new Error(`codigoCliente não encontrado no response: ${JSON.stringify(data)}`);
+    if (!codparc) {
+      throw new Error(`CODPARC não encontrado no response: ${rawText.slice(0, 500)}`);
     }
 
-    return codigoCliente;
+    return Number(codparc);
   } finally {
     clearTimeout(tid);
   }
 }
 
 // ---------------------------------------------------------------------------
-// Classifica se um erro HTTP do Sankhya é permanente (400) ou transitório (5xx)
-// Erros permanentes não devem ser retentados automaticamente.
+// Erros que não devem ser retentados sem correção de dados
+// (CPF duplicado, campo inválido, etc.)
 // ---------------------------------------------------------------------------
 function erroEhPermanente(msg: string): boolean {
-  // HTTP 400 do Sankhya = erro de negócio/dados — não adianta retentar sem corrigir dado
+  // 400 com "Parceiro já existe" ou "CPF duplicado" = dado inválido
+  // 400 com "PreparedStatement" = bug de configuração do Sankhya = transitório
+  if (msg.includes('PreparedStatement')) return false;
   return msg.includes('falhou: 400');
 }
 
@@ -364,14 +263,6 @@ async function processarCliente(
     } else if (!temPedido) {
       return { cliente_id: cliente.id, cpf, acao: 'ignorado' };
     } else {
-      // Garante que o bairro existe no Sankhya antes de criar o parceiro
-      await resolverBairro(
-        token, apiBase, supabase,
-        endereco?.bairro ?? null,
-        endereco?.cidade ?? null,
-        endereco?.uf     ?? null,
-      );
-
       codparc = await criarParceiro(token, apiBase, cliente, endereco);
       acao    = 'criado';
     }
@@ -382,7 +273,7 @@ async function processarCliente(
       .update({ codparc, integracao_status: 'integrado', integracao_erro: null })
       .eq('id', cliente.id);
 
-    if (updErr) throw new Error(`Falha ao atualizar codparc no Supabase: ${updErr.message}`);
+    if (updErr) throw new Error(`Falha ao atualizar codparc: ${updErr.message}`);
 
     return { cliente_id: cliente.id, cpf, acao, codparc };
 
@@ -390,7 +281,6 @@ async function processarCliente(
     const msg = err instanceof Error ? err.message : String(err);
     const permanente = erroEhPermanente(msg);
 
-    // Persiste o status de erro para evitar retentativas infinitas em falhas permanentes
     await supabase
       .from('cliente')
       .update({
@@ -428,7 +318,6 @@ Deno.serve(async (_req: Request) => {
   const logId = logRow.id;
 
   try {
-    // Busca clientes PF sem codparc que ainda não tenham erro permanente
     const { data: clientesRaw, error: cliErr } = await supabase
       .from('cliente')
       .select(`
@@ -441,7 +330,7 @@ Deno.serve(async (_req: Request) => {
 
     if (cliErr) throw new Error(`Falha ao buscar clientes: ${cliErr.message}`);
 
-    // Filtra apenas PF (CPF = 11 dígitos)
+    // Apenas PF (CPF = 11 dígitos)
     const clientes = (clientesRaw ?? [])
       .filter(c => apenasDigitos(c.cpf_cnpj).length === 11)
       .map(c => ({
@@ -456,7 +345,7 @@ Deno.serve(async (_req: Request) => {
         .from('log_sincronizacao')
         .update({ status: 'sucesso', registros_processados: 0, finalizado_em: new Date().toISOString() })
         .eq('id', logId);
-      return json({ success: true, status: 'sucesso', mensagem: 'Nenhum cliente elegível encontrado.', total_clientes: 0 });
+      return json({ success: true, status: 'sucesso', mensagem: 'Nenhum cliente elegível.', total_clientes: 0 });
     }
 
     const token   = await getSankhyaToken();
@@ -466,55 +355,34 @@ Deno.serve(async (_req: Request) => {
     let deadlineAtingido = false;
 
     for (let i = 0; i < total; i += BATCH_SIZE) {
-      if (Date.now() - startTime > DEADLINE_MS) {
-        deadlineAtingido = true;
-        break;
-      }
+      if (Date.now() - startTime > DEADLINE_MS) { deadlineAtingido = true; break; }
 
       const lote = clientes.slice(i, i + BATCH_SIZE);
-
       const loteResultados = await Promise.all(
         lote.map(c => {
-          const clienteRow: ClienteRow = {
-            id:       c.id,
-            nome:     c.nome,
-            cpf_cnpj: c.cpf_cnpj,
-            email:    c.email,
-            telefone: c.telefone,
-          };
-
+          const clienteRow: ClienteRow = { id: c.id, nome: c.nome, cpf_cnpj: c.cpf_cnpj, email: c.email, telefone: c.telefone };
           const enderecos = Array.isArray(c.endereco) ? c.endereco : (c.endereco ? [c.endereco] : []);
           const endPadrao = enderecos.find((e: { is_padrao: boolean }) => e.is_padrao) ?? enderecos[0] ?? null;
           const enderecoRow: EnderecoRow | null = endPadrao ? {
-            cep:         endPadrao.cep,
-            logradouro:  endPadrao.logradouro,
-            numero:      endPadrao.numero,
-            complemento: endPadrao.complemento,
-            bairro:      endPadrao.bairro,
-            cidade:      endPadrao.cidade,
-            uf:          endPadrao.uf,
+            cep: endPadrao.cep, logradouro: endPadrao.logradouro, numero: endPadrao.numero,
+            complemento: endPadrao.complemento, bairro: endPadrao.bairro,
+            cidade: endPadrao.cidade, uf: endPadrao.uf,
           } : null;
-
           return processarCliente(token, apiBase, supabase, clienteRow, enderecoRow, c.temPedido);
         }),
       );
-
       resultados.push(...loteResultados);
     }
 
-    const criados          = resultados.filter(r => r.acao === 'criado').length;
-    const reconciliados    = resultados.filter(r => r.acao === 'reconciliado').length;
-    const ignorados        = resultados.filter(r => r.acao === 'ignorado').length;
-    const errosPermanentes = resultados.filter(r => r.acao === 'erro_permanente');
+    const criados           = resultados.filter(r => r.acao === 'criado').length;
+    const reconciliados     = resultados.filter(r => r.acao === 'reconciliado').length;
+    const ignorados         = resultados.filter(r => r.acao === 'ignorado').length;
+    const errosPermanentes  = resultados.filter(r => r.acao === 'erro_permanente');
     const errosTransitorios = resultados.filter(r => r.acao === 'erro');
-    const totalOk          = criados + reconciliados;
-    const totalErros       = errosPermanentes.length + errosTransitorios.length;
-
-    const statusFinal = totalErros > 0 && totalOk === 0
-      ? 'erro'
-      : deadlineAtingido ? 'parcial' : 'sucesso';
-
-    const todosErros = [...errosPermanentes, ...errosTransitorios];
+    const totalOk           = criados + reconciliados;
+    const totalErros        = errosPermanentes.length + errosTransitorios.length;
+    const statusFinal       = totalErros > 0 && totalOk === 0 ? 'erro' : deadlineAtingido ? 'parcial' : 'sucesso';
+    const todosErros        = [...errosPermanentes, ...errosTransitorios];
 
     await supabase
       .from('log_sincronizacao')
@@ -529,12 +397,8 @@ Deno.serve(async (_req: Request) => {
       .eq('id', logId);
 
     return json({
-      success: true,
-      status: statusFinal,
-      total_elegiveis: total,
-      criados,
-      reconciliados,
-      ignorados,
+      success: true, status: statusFinal,
+      total_elegiveis: total, criados, reconciliados, ignorados,
       erros_permanentes: errosPermanentes.length,
       erros_transitorios: errosTransitorios.length,
       detalhes_erros: todosErros.map(e => ({ cpf: e.cpf, acao: e.acao, erro: e.erro })),
