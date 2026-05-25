@@ -27,6 +27,9 @@ interface EnderecoRow {
   bairro:      string | null;
   cidade:      string | null;
   uf:          string | null;
+  codcid:      number | null;
+  nomecid:     string | null;
+  codibge:     string | null;
 }
 
 interface ResultadoCliente {
@@ -108,31 +111,6 @@ async function buscarCodparcPorCpf(
   return data?.codparc ?? null;
 }
 
-
-// ---------------------------------------------------------------------------
-// Carrega mapa cidade-normalizada → codibge a partir da tabela local
-// ---------------------------------------------------------------------------
-function normalizarNome(s: string): string {
-  return s.normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase().trim();
-}
-
-interface CidadeEntry { codibge: string; nomecid: string; }
-
-async function carregarCidadeMap(
-  supabase: ReturnType<typeof createClient>,
-): Promise<Map<string, CidadeEntry>> {
-  const { data } = await supabase
-    .from('cidade')
-    .select('nomecid, codibge')
-    .not('codibge', 'is', null);
-
-  const map = new Map<string, CidadeEntry>();
-  for (const row of data ?? []) {
-    map.set(normalizarNome(row.nomecid), { codibge: String(row.codibge), nomecid: row.nomecid });
-  }
-  return map;
-}
-
 // ---------------------------------------------------------------------------
 // Cria parceiro no Sankhya via REST POST /v1/parceiros/clientes
 // ---------------------------------------------------------------------------
@@ -140,32 +118,26 @@ async function criarParceiro(
   token: string,
   apiBase: string,
   cliente: ClienteRow,
-  endereco: EnderecoRow | null,
-  cidadeMap: Map<string, CidadeEntry>,
+  endereco: EnderecoRow,
 ): Promise<number> {
-  const cpfFormatado = formatarCpf(apenasDigitos(cliente.cpf_cnpj));
-  const fone         = parseTelefone(cliente.telefone);
-  const cepLimpo     = apenasDigitos(endereco?.cep);
-
-  const cidadeEntry = endereco?.cidade
-    ? cidadeMap.get(normalizarNome(endereco.cidade)) ?? null
-    : null;
-  if (!cidadeEntry) throw new Error(`Código IBGE não encontrado para ${endereco?.cidade}/${endereco?.uf}`);
+  const cpf      = apenasDigitos(cliente.cpf_cnpj);
+  const fone     = parseTelefone(cliente.telefone);
+  const cepLimpo = apenasDigitos(endereco.cep);
 
   const enderecoPayload: Record<string, unknown> = {
-    logradouro:  endereco!.logradouro,
-    numero:      endereco!.numero,
-    bairro:      endereco!.bairro,
-    cidade:      cidadeEntry.nomecid,
-    uf:          endereco!.uf,
+    logradouro:  endereco.logradouro,
+    numero:      endereco.numero,
+    bairro:      endereco.bairro,
+    cidade:      endereco.nomecid,
+    uf:          endereco.uf,
     cep:         cepLimpo,
-    codigolbge:  cidadeEntry.codibge,
+    codigolbge:  endereco.codibge,
   };
-  if (endereco?.complemento) enderecoPayload['complemento'] = endereco.complemento;
+  if (endereco.complemento) enderecoPayload['complemento'] = endereco.complemento;
 
   const payload: Record<string, unknown> = {
     tipo:    'PF',
-    cnpjCpf: cpfFormatado,
+    cnpjCpf: cpf,
     ieRg:    'ISENTO',
     nome:    cliente.nome.toUpperCase(),
   };
@@ -199,12 +171,12 @@ async function criarParceiro(
       throw new Error(`POST /v1/parceiros falhou: ${res.status} — ${rawText.slice(0, 1000)}`);
     }
 
-    // O response retorna codigoParceiro, codparc ou id dependendo da versão
     const codparc =
-      (data?.codigoParceiro as number | undefined) ??
-      (data?.codParc        as number | undefined) ??
-      (data?.codparc        as number | undefined) ??
-      (data?.id             as number | undefined);
+      (data?.codigoCliente  as number | string | undefined) ??
+      (data?.codigoParceiro as number | string | undefined) ??
+      (data?.codParc        as number | string | undefined) ??
+      (data?.codparc        as number | string | undefined) ??
+      (data?.id             as number | string | undefined);
 
     if (!codparc) {
       throw new Error(`CODPARC não encontrado no response: ${rawText.slice(0, 500)}`);
@@ -218,13 +190,10 @@ async function criarParceiro(
 
 // ---------------------------------------------------------------------------
 // Erros que não devem ser retentados sem correção de dados
-// (CPF duplicado, campo inválido, etc.)
 // ---------------------------------------------------------------------------
 function erroEhPermanente(msg: string): boolean {
-  // Erros que indicam bug de código/configuração = transitório (retentável após correção)
   if (msg.includes('PreparedStatement')) return false;
   if (msg.includes('ORA-')) return false;
-  // 400 com mensagem de negócio (CPF duplicado, campo inválido) = verdadeiramente permanente
   return msg.includes('falhou: 400');
 }
 
@@ -238,20 +207,19 @@ async function processarCliente(
   cliente: ClienteRow,
   endereco: EnderecoRow | null,
   temPedido: boolean,
-  cidadeMap: Map<string, string>,
 ): Promise<ResultadoCliente> {
   const cpf = apenasDigitos(cliente.cpf_cnpj);
 
   try {
     // 1. Valida campos obrigatórios do endereço antes de qualquer chamada à API
-    //    POST /v1/parceiros/clientes exige endereco completo; campo ausente = erro 400 no Sankhya
     const camposFaltando: string[] = [];
-    if (!endereco?.logradouro) camposFaltando.push('logradouro');
-    if (!endereco?.numero)     camposFaltando.push('numero');
-    if (!endereco?.bairro)     camposFaltando.push('bairro');
-    if (!endereco?.cidade)     camposFaltando.push('cidade');
-    if (!endereco?.uf)         camposFaltando.push('uf');
-    if (!apenasDigitos(endereco?.cep)) camposFaltando.push('cep');
+    if (!endereco?.logradouro)            camposFaltando.push('logradouro');
+    if (!endereco?.numero)                camposFaltando.push('numero');
+    if (!endereco?.bairro)                camposFaltando.push('bairro');
+    if (!endereco?.uf)                    camposFaltando.push('uf');
+    if (!apenasDigitos(endereco?.cep))    camposFaltando.push('cep');
+    if (!endereco?.codcid)                camposFaltando.push('codcid');
+    if (!endereco?.codibge)               camposFaltando.push('codibge');
 
     if (camposFaltando.length > 0) {
       const msg = `Endereço incompleto — campos obrigatórios ausentes: ${camposFaltando.join(', ')}`;
@@ -274,7 +242,7 @@ async function processarCliente(
     } else if (!temPedido) {
       return { cliente_id: cliente.id, cpf, acao: 'ignorado' };
     } else {
-      codparc = await criarParceiro(token, apiBase, cliente, endereco, cidadeMap);
+      codparc = await criarParceiro(token, apiBase, cliente, endereco!);
       acao    = 'criado';
     }
 
@@ -334,7 +302,7 @@ Deno.serve(async (_req: Request) => {
       .select(`
         id, nome, cpf_cnpj, email, telefone,
         pedido(id),
-        endereco(cep, logradouro, numero, complemento, bairro, cidade, uf, is_padrao)
+        endereco(cep, logradouro, numero, complemento, bairro, cidade, uf, is_padrao, codcid, cidade_info:cidade(nomecid, codibge))
       `)
       .is('codparc', null)
       .or('integracao_status.is.null,integracao_status.eq.pendente');
@@ -359,9 +327,8 @@ Deno.serve(async (_req: Request) => {
       return json({ success: true, status: 'sucesso', mensagem: 'Nenhum cliente elegível.', total_clientes: 0 });
     }
 
-    const token      = await getSankhyaToken();
-    const apiBase    = getApiBase(Deno.env.get('SANKHYA_AUTH_URL')!);
-    const cidadeMap  = await carregarCidadeMap(supabase);
+    const token   = await getSankhyaToken();
+    const apiBase = getApiBase(Deno.env.get('SANKHYA_AUTH_URL')!);
 
     const resultados: ResultadoCliente[] = [];
     let deadlineAtingido = false;
@@ -370,20 +337,25 @@ Deno.serve(async (_req: Request) => {
       if (Date.now() - startTime > DEADLINE_MS) { deadlineAtingido = true; break; }
 
       const lote = clientes.slice(i, i + BATCH_SIZE);
-      const loteResultados = await Promise.all(
-        lote.map(c => {
-          const clienteRow: ClienteRow = { id: c.id, nome: c.nome, cpf_cnpj: c.cpf_cnpj, email: c.email, telefone: c.telefone };
-          const enderecos = Array.isArray(c.endereco) ? c.endereco : (c.endereco ? [c.endereco] : []);
-          const endPadrao = enderecos.find((e: { is_padrao: boolean }) => e.is_padrao) ?? enderecos[0] ?? null;
-          const enderecoRow: EnderecoRow | null = endPadrao ? {
-            cep: endPadrao.cep, logradouro: endPadrao.logradouro, numero: endPadrao.numero,
-            complemento: endPadrao.complemento, bairro: endPadrao.bairro,
-            cidade: endPadrao.cidade, uf: endPadrao.uf,
-          } : null;
-          return processarCliente(token, apiBase, supabase, clienteRow, enderecoRow, c.temPedido, cidadeMap);
-        }),
-      );
-      resultados.push(...loteResultados);
+      for (const c of lote) {
+        const clienteRow: ClienteRow = { id: c.id, nome: c.nome, cpf_cnpj: c.cpf_cnpj, email: c.email, telefone: c.telefone };
+        const enderecos = Array.isArray(c.endereco) ? c.endereco : (c.endereco ? [c.endereco] : []);
+        const endPadrao = enderecos.find((e: { is_padrao: boolean }) => e.is_padrao) ?? enderecos[0] ?? null;
+        const enderecoRow: EnderecoRow | null = endPadrao ? {
+          cep:         endPadrao.cep,
+          logradouro:  endPadrao.logradouro,
+          numero:      endPadrao.numero,
+          complemento: endPadrao.complemento,
+          bairro:      endPadrao.bairro,
+          cidade:      endPadrao.cidade,
+          uf:          endPadrao.uf,
+          codcid:      endPadrao.codcid ?? null,
+          nomecid:     endPadrao.cidade_info?.nomecid ?? null,
+          codibge:     endPadrao.cidade_info?.codibge != null ? String(endPadrao.cidade_info.codibge) : null,
+        } : null;
+        const resultado = await processarCliente(token, apiBase, supabase, clienteRow, enderecoRow, c.temPedido);
+        resultados.push(resultado);
+      }
     }
 
     const criados              = resultados.filter(r => r.acao === 'criado').length;
