@@ -23,6 +23,8 @@ Tabela principal de produtos. Espelha os campos relevantes do TGFPRO do Sankhya.
 | `largura` | `numeric` | YES | — | Largura em cm |
 | `comprimento` | `numeric` | YES | — | Comprimento/profundidade em cm (`ESPESSURA`) |
 | `dtalter` | `timestamptz` | YES | — | Data da última alteração no Sankhya — controle incremental |
+| `codprodemb` | `bigint` | YES | — | FK → `embalagem.codprod` — embalagem padrão do produto |
+| `qtdemb` | `integer` | YES | — | Quantidade de unidades por embalagem |
 
 > **Sync:** apenas produtos com `AD_SYNCSITE='S'` no Sankhya. Controle incremental por `DTALTER`.
 
@@ -112,6 +114,8 @@ Cadastro de clientes, vinculado ao `auth.users` do Supabase.
 | `email` | `text` | YES | — | E-mail |
 | `telefone` | `text` | YES | — | Telefone |
 | `is_admin` | `boolean` | NO | `false` | Flag de administrador |
+| `integracao_status` | `text` | YES | — | `NULL` = pendente / `integrado` / `erro_permanente` |
+| `integracao_erro` | `text` | YES | — | Mensagem do último erro de integração com Sankhya |
 
 ---
 
@@ -149,8 +153,11 @@ Cabeçalho do pedido. Persiste no Supabase antes de ir ao Sankhya.
 | `vlr_frete` | `numeric` | YES | `0` | Valor do frete |
 | `peso_total` | `numeric` | YES | — | Peso total calculado |
 | `dt_pedido` | `timestamptz` | YES | `now()` | Data/hora do pedido |
-| `metodo_pagamento` | `text` | YES | — | `'pix'` / `'boleto'` / `'cartao'` |
+| `metodo_pagamento` | `text` | YES | — | `'pix'` / `'boleto'` / `'cartao'` / `'mercadopago'` |
 | `log_erro_integracao` | `text` | YES | — | Último erro de integração com Sankhya (limpo após sucesso) |
+| `mp_preference_id` | `text` | YES | — | ID da preferência no MercadoPago |
+| `mp_payment_id` | `text` | YES | — | ID do pagamento confirmado no MercadoPago |
+| `endereco_id` | `integer` | YES | — | FK → `endereco.id` — endereço de entrega selecionado |
 
 **Valores possíveis de `pedido.status`:**
 
@@ -173,6 +180,128 @@ Itens do pedido.
 | `codprod` | `bigint` | YES | — | FK → `produto.codprod` |
 | `quantidade` | `numeric` | NO | — | Quantidade negociada |
 | `vlr_unitario` | `numeric` | NO | — | Valor unitário no momento do pedido |
+
+---
+
+## Carrinho
+
+### `carrinho`
+Itens adicionados ao carrinho antes da finalização do pedido.
+
+| Coluna | Tipo | Nullable | Default | Descrição |
+|---|---|---|---|---|
+| `id` | `bigint` | NO | — | PK |
+| `cliente_id` | `uuid` | YES | — | FK → `cliente.id` |
+| `codprod` | `bigint` | YES | — | FK → `produto.codprod` |
+| `quantidade` | `integer` | NO | `1` | Quantidade (CHECK > 0) |
+| `criado_em` | `timestamptz` | YES | `now()` | Timestamp de criação |
+| `atualizado_em` | `timestamptz` | YES | `now()` | Timestamp da última atualização |
+| `peso_total` | `numeric` | YES | `0` | Peso total do item (kg): peso_unitário × quantidade |
+
+---
+
+## Embalagem
+
+### `embalagem`
+Produtos que funcionam como embalagens (caixas) no frete. Espelha TGFPRO para os produtos de embalagem.
+
+| Coluna | Tipo | Nullable | Default | Descrição |
+|---|---|---|---|---|
+| `codprod` | `bigint` | NO | — | PK — código do produto-embalagem no Sankhya |
+| `descrprod` | `text` | NO | — | Descrição da embalagem |
+| `peso` | `numeric` | YES | — | Peso da embalagem vazia em kg |
+| `altura` | `numeric` | YES | — | Altura em cm |
+| `largura` | `numeric` | YES | — | Largura em cm |
+| `comprimento` | `numeric` | YES | — | Comprimento em cm |
+
+---
+
+### `pedido_embalagem`
+Embalagens selecionadas por pedido (resultado do cálculo de frete/cubagem).
+
+| Coluna | Tipo | Nullable | Default | Descrição |
+|---|---|---|---|---|
+| `id` | `bigint` | NO | — | PK |
+| `pedido_id` | `bigint` | NO | — | FK → `pedido.id` |
+| `embalagem_codprod` | `bigint` | YES | — | FK → `embalagem.codprod` |
+| `quantidade_caixas` | `integer` | NO | `1` | Número de caixas deste tipo |
+| `peso_total` | `numeric` | NO | `0` | Peso total das caixas em kg |
+| `cenario` | `text` | NO | — | `'unitario'` / `'padrao'` / `'catalogo'` |
+| `criado_em` | `timestamptz` | NO | `now()` | Timestamp de criação |
+
+---
+
+## Auxiliares (sync-bairros)
+
+### `cidade`
+Cidades sincronizadas do Sankhya (TGFCID). Usada para resolver o `codigolbge` no payload de criação de parceiro.
+
+| Coluna | Tipo | Nullable | Default | Descrição |
+|---|---|---|---|---|
+| `codcid` | `bigint` | NO | — | PK — código interno Sankhya |
+| `nomecid` | `text` | NO | — | Nome da cidade |
+| `uf` | `varchar` | YES | — | CODUF numérico do Sankhya (ex: `'2'` = MG) — não é a sigla textual |
+| `codibge` | `bigint` | YES | — | Código IBGE do município — campo obrigatório no payload `codigolbge` de `integrar-clientes` |
+
+> **Nota:** `uf` armazena o código numérico do Sankhya, não a sigla UF. `codibge` é preenchido pela função `util-update-cidade-codibge`.
+
+---
+
+### `bairro`
+Bairros sincronizados do Sankhya (TGFBAI).
+
+| Coluna | Tipo | Nullable | Default | Descrição |
+|---|---|---|---|---|
+| `codbai` | `bigint` | NO | — | PK — código interno Sankhya |
+| `nomebai` | `text` | NO | — | Nome do bairro |
+| `codcid` | `bigint` | YES | — | FK → `cidade.codcid` — **sempre null** (CODCID não retorna via loadRecords nesta instância) |
+
+> **Limitação:** `CODCID` não está disponível na entidade `Bairro` via loadRecords. Retorna erro `"Descritor do campo 'CODCID' inválido"`. A coluna `codcid` é sempre `null`.
+
+---
+
+## Parceiros (snapshot)
+
+### `parceiro`
+Snapshot local dos parceiros ativos do Sankhya (TGFPAR). Usado por `sync-parceiros` para consulta local de CPF sem depender da API do ERP em tempo real.
+
+| Coluna | Tipo | Nullable | Default | Descrição |
+|---|---|---|---|---|
+| `codparc` | `integer` | NO | — | PK — código do parceiro no Sankhya |
+| `cgc_cpf` | `text` | YES | — | CPF ou CNPJ do parceiro |
+
+> **⚠️ Segurança:** RLS está **desabilitado** nesta tabela. Qualquer detentor da anon key pode ler ou modificar todos os registros. Habilitar RLS antes de expor ao frontend. SQL: `ALTER TABLE public.parceiro ENABLE ROW LEVEL SECURITY;`
+
+---
+
+## Externas
+
+### `ext_product_images`
+Gerenciamento de imagens de produtos vindas de fontes externas.
+
+| Coluna | Tipo | Nullable | Default | Descrição |
+|---|---|---|---|---|
+| `id` | `uuid` | NO | `gen_random_uuid()` | PK |
+| `product_code` | `text` | NO | — | Código externo do produto |
+| `file_path` | `text` | NO | — | Caminho do arquivo no storage |
+| `resolution_type` | `text` | YES | — | `'high'` / `'low'` / `'manual'` |
+| `position` | `integer` | YES | `0` | Ordem de exibição |
+| `public_url` | `text` | YES | — | URL pública da imagem |
+| `created_at` | `timestamptz` | YES | `now()` | Timestamp de criação |
+| `deleted_at` | `timestamptz` | YES | — | Soft delete |
+
+---
+
+### `ext_api_keys`
+Chaves de API para autenticação de serviços externos.
+
+| Coluna | Tipo | Nullable | Default | Descrição |
+|---|---|---|---|---|
+| `id` | `uuid` | NO | `gen_random_uuid()` | PK |
+| `user_id` | `uuid` | NO | — | FK → `auth.users.id` |
+| `api_key` | `text` | NO | — | Chave de API (única) |
+| `created_at` | `timestamptz` | YES | `now()` | Timestamp de criação |
+| `last_used_at` | `timestamptz` | YES | — | Último uso da chave |
 
 ---
 

@@ -110,27 +110,27 @@ async function buscarCodparcPorCpf(
 
 
 // ---------------------------------------------------------------------------
-// Busca código IBGE do município via API pública do IBGE
+// Carrega mapa cidade-normalizada → codibge a partir da tabela local
 // ---------------------------------------------------------------------------
-async function buscarCodigoIbge(uf: string, nomeCidade: string): Promise<string | null> {
-  const ctrl = new AbortController();
-  const tid  = setTimeout(() => ctrl.abort(), HTTP_TIMEOUT_MS);
-  try {
-    const res = await fetch(
-      `https://servicodados.ibge.gov.br/api/v1/localidades/estados/${uf}/municipios`,
-      { signal: ctrl.signal },
-    );
-    if (!res.ok) return null;
-    const municipios: Array<{ id: number; nome: string }> = await res.json();
-    const norm = (s: string) =>
-      s.normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase().trim();
-    const encontrado = municipios.find(m => norm(m.nome) === norm(nomeCidade));
-    return encontrado ? String(encontrado.id) : null;
-  } catch {
-    return null;
-  } finally {
-    clearTimeout(tid);
+function normalizarNome(s: string): string {
+  return s.normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase().trim();
+}
+
+interface CidadeEntry { codibge: string; nomecid: string; }
+
+async function carregarCidadeMap(
+  supabase: ReturnType<typeof createClient>,
+): Promise<Map<string, CidadeEntry>> {
+  const { data } = await supabase
+    .from('cidade')
+    .select('nomecid, codibge')
+    .not('codibge', 'is', null);
+
+  const map = new Map<string, CidadeEntry>();
+  for (const row of data ?? []) {
+    map.set(normalizarNome(row.nomecid), { codibge: String(row.codibge), nomecid: row.nomecid });
   }
+  return map;
 }
 
 // ---------------------------------------------------------------------------
@@ -141,33 +141,33 @@ async function criarParceiro(
   apiBase: string,
   cliente: ClienteRow,
   endereco: EnderecoRow | null,
+  cidadeMap: Map<string, CidadeEntry>,
 ): Promise<number> {
   const cpfFormatado = formatarCpf(apenasDigitos(cliente.cpf_cnpj));
   const fone         = parseTelefone(cliente.telefone);
   const cepLimpo     = apenasDigitos(endereco?.cep);
 
-  const codigoIbge = (endereco?.uf && endereco?.cidade)
-    ? await buscarCodigoIbge(endereco.uf, endereco.cidade)
+  const cidadeEntry = endereco?.cidade
+    ? cidadeMap.get(normalizarNome(endereco.cidade)) ?? null
     : null;
-  if (!codigoIbge) throw new Error(`Código IBGE não encontrado para ${endereco?.cidade}/${endereco?.uf}`);
+  if (!cidadeEntry) throw new Error(`Código IBGE não encontrado para ${endereco?.cidade}/${endereco?.uf}`);
 
   const enderecoPayload: Record<string, unknown> = {
-    logradouro: endereco!.logradouro,
-    numero:     endereco!.numero,
-    bairro:     endereco!.bairro,
-    cidade:     endereco!.cidade,
-    uf:         endereco!.uf,
-    cep:        cepLimpo,
-    codigoIbge,
+    logradouro:  endereco!.logradouro,
+    numero:      endereco!.numero,
+    bairro:      endereco!.bairro,
+    cidade:      cidadeEntry.nomecid,
+    uf:          endereco!.uf,
+    cep:         cepLimpo,
+    codigolbge:  cidadeEntry.codibge,
   };
   if (endereco?.complemento) enderecoPayload['complemento'] = endereco.complemento;
 
   const payload: Record<string, unknown> = {
-    tipo:     'PF',
-    cnpjCpf:  cpfFormatado,
-    ieRg:     '',
-    nome:     cliente.nome.toUpperCase(),
-    contatos: [],
+    tipo:    'PF',
+    cnpjCpf: cpfFormatado,
+    ieRg:    'ISENTO',
+    nome:    cliente.nome.toUpperCase(),
   };
 
   if (cliente.email) payload['email'] = cliente.email;
@@ -221,9 +221,10 @@ async function criarParceiro(
 // (CPF duplicado, campo inválido, etc.)
 // ---------------------------------------------------------------------------
 function erroEhPermanente(msg: string): boolean {
-  // 400 com "Parceiro já existe" ou "CPF duplicado" = dado inválido
-  // 400 com "PreparedStatement" = bug de configuração do Sankhya = transitório
+  // Erros que indicam bug de código/configuração = transitório (retentável após correção)
   if (msg.includes('PreparedStatement')) return false;
+  if (msg.includes('ORA-')) return false;
+  // 400 com mensagem de negócio (CPF duplicado, campo inválido) = verdadeiramente permanente
   return msg.includes('falhou: 400');
 }
 
@@ -237,6 +238,7 @@ async function processarCliente(
   cliente: ClienteRow,
   endereco: EnderecoRow | null,
   temPedido: boolean,
+  cidadeMap: Map<string, string>,
 ): Promise<ResultadoCliente> {
   const cpf = apenasDigitos(cliente.cpf_cnpj);
 
@@ -272,7 +274,7 @@ async function processarCliente(
     } else if (!temPedido) {
       return { cliente_id: cliente.id, cpf, acao: 'ignorado' };
     } else {
-      codparc = await criarParceiro(token, apiBase, cliente, endereco);
+      codparc = await criarParceiro(token, apiBase, cliente, endereco, cidadeMap);
       acao    = 'criado';
     }
 
@@ -357,8 +359,9 @@ Deno.serve(async (_req: Request) => {
       return json({ success: true, status: 'sucesso', mensagem: 'Nenhum cliente elegível.', total_clientes: 0 });
     }
 
-    const token   = await getSankhyaToken();
-    const apiBase = getApiBase(Deno.env.get('SANKHYA_AUTH_URL')!);
+    const token      = await getSankhyaToken();
+    const apiBase    = getApiBase(Deno.env.get('SANKHYA_AUTH_URL')!);
+    const cidadeMap  = await carregarCidadeMap(supabase);
 
     const resultados: ResultadoCliente[] = [];
     let deadlineAtingido = false;
@@ -377,7 +380,7 @@ Deno.serve(async (_req: Request) => {
             complemento: endPadrao.complemento, bairro: endPadrao.bairro,
             cidade: endPadrao.cidade, uf: endPadrao.uf,
           } : null;
-          return processarCliente(token, apiBase, supabase, clienteRow, enderecoRow, c.temPedido);
+          return processarCliente(token, apiBase, supabase, clienteRow, enderecoRow, c.temPedido, cidadeMap);
         }),
       );
       resultados.push(...loteResultados);
