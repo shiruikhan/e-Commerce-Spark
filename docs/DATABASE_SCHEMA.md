@@ -132,9 +132,12 @@ Endereços de entrega dos clientes.
 | `numero` | `text` | YES | — | Número |
 | `complemento` | `text` | YES | — | Complemento |
 | `bairro` | `text` | YES | — | Bairro |
-| `cidade` | `text` | YES | — | Cidade |
+| `cidade` | `text` | YES | — | Nome da cidade (texto livre) |
 | `uf` | `varchar` | YES | — | Estado (2 letras) |
 | `is_padrao` | `boolean` | NO | `false` | Endereço padrão do cliente |
+| `codcid` | `bigint` | YES | — | FK → `cidade.codcid` — código interno Sankhya da cidade; preenchido automaticamente via backfill por nome ou pelo frontend ao cadastrar endereço |
+
+> **Integração:** `codcid` é obrigatório para `integrar-clientes`. O join com `cidade` resolve `nomecid` e `codibge` para montar o payload `codigolbge` enviado ao Sankhya.
 
 ---
 
@@ -180,6 +183,7 @@ Itens do pedido.
 | `codprod` | `bigint` | YES | — | FK → `produto.codprod` |
 | `quantidade` | `numeric` | NO | — | Quantidade negociada |
 | `vlr_unitario` | `numeric` | NO | — | Valor unitário no momento do pedido |
+| `sequencia` | `integer` | YES | — | Sequencial 1-based por pedido; enviado ao campo `SEQUENCIA` da TGFITE no Sankhya — preenchido pelo frontend no checkout |
 
 ---
 

@@ -2,27 +2,25 @@ import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
 
 // ---------------------------------------------------------------------------
-// Configurações fixas — regras obrigatórias do projeto
+// Constantes fixas — confirmadas com o Sankhya em 25/05/2026
 // ---------------------------------------------------------------------------
-const NOTA_MODELO     = 1006;  // TOP do e-commerce no Sankhya
-const CODIGO_VENDEDOR = 6;     // Vendedor padrão e-commerce
-const CODIGO_EMPRESA  = 2;     // CODEMP
-
-/** Mapeamento metodo_pagamento (Supabase) → codTipVenda (Sankhya) */
-const COD_TIP_VENDA: Record<string, number> = {
-  boleto:  87,
-  cartao:  86,
-  cartão:  86,
-  pix:     140,
-};
+const NOTA_MODELO          = 793370; // Código do Modelo de Nota no Sankhya Om — pré-define CODEMP, TOP, CFOP
+const CODIGO_VENDEDOR      = 6;      // Vendedor padrão e-commerce
+const CODIGO_LOCAL_ESTOQUE = 109;    // CODLOCAL do estoque de saída (TGFEST)
+const CONTROLE_ITEM        = ' ';    // Campo interno Sankhya; espaço fixo para todos os produtos
+const TIPO_PAGAMENTO       = 53;     // CODTIPTIT fixo — recebimento único via intermediário
 
 const HTTP_TIMEOUT_MS = 25_000;
 const DEADLINE_MS     = 130_000;
-const BATCH_SIZE      = 3; // conservador: cada pedido gera múltiplas chamadas
+const BATCH_SIZE      = 3;
 
 // ---------------------------------------------------------------------------
 // Tipos locais
 // ---------------------------------------------------------------------------
+interface ClienteJoin {
+  codparc: number;
+}
+
 interface PedidoRow {
   id:               number;
   cliente_id:       string;
@@ -30,17 +28,19 @@ interface PedidoRow {
   vlr_frete:        number | null;
   dt_pedido:        string;
   metodo_pagamento: string | null;
+  cliente:          ClienteJoin;
 }
 
 interface PedidoItemRow {
   codprod:      number;
   quantidade:   number;
   vlr_unitario: number;
+  sequencia:    number | null;
 }
 
 interface ResultadoPedido {
   pedido_id: number;
-  acao:      'integrado' | 'sem_codparc' | 'sem_pagamento' | 'erro';
+  acao:      'integrado' | 'sem_codparc' | 'erro';
   nunota?:   number;
   erro?:     string;
 }
@@ -83,7 +83,7 @@ function getApiBase(authUrl: string): string {
 // Helpers de data/hora — Sankhya espera DD/MM/AAAA e HH:MM:SS
 // ---------------------------------------------------------------------------
 function formatarData(iso: string): string {
-  const d = new Date(iso);
+  const d    = new Date(iso);
   const dd   = String(d.getDate()).padStart(2, '0');
   const mm   = String(d.getMonth() + 1).padStart(2, '0');
   const yyyy = d.getFullYear();
@@ -110,33 +110,30 @@ async function criarPedidoSankhya(
   itens: PedidoItemRow[],
   codparc: number,
 ): Promise<{ nunota: number; resposta: unknown }> {
-  const metodoPag  = (pedido.metodo_pagamento ?? '').toLowerCase().trim();
-  const codTipVenda = COD_TIP_VENDA[metodoPag];
-
-  if (!codTipVenda) {
-    throw new Error(`Método de pagamento não mapeado: '${pedido.metodo_pagamento}'`);
-  }
-
   const payload: Record<string, unknown> = {
     notaModelo:     NOTA_MODELO,
-    codigoEmpresa:  CODIGO_EMPRESA,
     data:           formatarData(pedido.dt_pedido),
     hora:           formatarHora(pedido.dt_pedido),
     codigoVendedor: CODIGO_VENDEDOR,
     codigoCliente:  codparc,
     valorTotal:     Number(pedido.vlr_total),
-    // Frete só enviado se existir e > 0
     ...(pedido.vlr_frete && Number(pedido.vlr_frete) > 0
       ? { valorFrete: Number(pedido.vlr_frete) }
       : {}),
-    itens: itens.map(item => ({
-      codigoProduto: item.codprod,
-      quantidade:    Number(item.quantidade),
-      valorUnitario: Number(item.vlr_unitario),
+    itens: itens.map((item, idx) => ({
+      sequencia:          item.sequencia ?? (idx + 1),
+      codigoProduto:      item.codprod,
+      quantidade:         Number(item.quantidade),
+      valorUnitario:      Number(item.vlr_unitario),
+      codigoLocalEstoque: CODIGO_LOCAL_ESTOQUE,
+      controle:           CONTROLE_ITEM,
     })),
     financeiros: [{
-      codTipVenda,
-      valor: Number(pedido.vlr_total),
+      sequencia:      1,
+      tipoPagamento:  TIPO_PAGAMENTO,
+      dataVencimento: formatarData(pedido.dt_pedido),
+      valorParcela:   Number(pedido.vlr_total),
+      idTransacao:    `Pedido #${pedido.id} no e-commerce`,
     }],
   };
 
@@ -161,11 +158,15 @@ async function criarPedidoSankhya(
       throw new Error(`POST /v1/vendas/pedidos falhou: ${res.status} — ${msg}`);
     }
 
-    // O response pode usar codigoNota, nunota ou codigoPedido dependendo da versão
-    const nunota =
-      (data?.codigoNota     as number | undefined) ??
-      (data?.nunota         as number | undefined) ??
-      (data?.codigoPedido   as number | undefined);
+    // Extrai o código do pedido — a API pode retornar em campos e tipos variados
+    const rawNunota =
+      (data?.codigoNota                                   as string | number | undefined) ??
+      (data?.nunota                                       as string | number | undefined) ??
+      (data?.codigoPedido                                 as string | number | undefined) ??
+      ((data?.retorno as Record<string, unknown>)?.codigoPedido as string | number | undefined) ??
+      (data?.codigo                                       as string | number | undefined);
+
+    const nunota = rawNunota !== undefined ? Number(rawNunota) : undefined;
 
     if (!nunota) {
       throw new Error(`nunota não encontrado no response: ${JSON.stringify(data)}`);
@@ -211,73 +212,48 @@ async function cancelarPedidoSankhya(
 }
 
 // ---------------------------------------------------------------------------
-// Processa um pedido: busca cliente/itens → cria no Sankhya → atualiza Supabase
+// Processa um pedido: busca itens → cria no Sankhya → atualiza Supabase
+// codparc já resolvido pelo !inner join na query principal
 // ---------------------------------------------------------------------------
 async function processarPedido(
   token: string,
   apiBase: string,
   supabase: ReturnType<typeof createClient>,
   pedido: PedidoRow,
+  codparc: number,
 ): Promise<ResultadoPedido> {
-  // 1. Verifica método de pagamento antes de qualquer chamada externa
-  const metodoPag = (pedido.metodo_pagamento ?? '').toLowerCase().trim();
-  if (!COD_TIP_VENDA[metodoPag]) {
-    const msg = `Método de pagamento não mapeado: '${pedido.metodo_pagamento}'`;
-    await supabase.from('pedido').update({ log_erro_integracao: msg }).eq('id', pedido.id);
-    return { pedido_id: pedido.id, acao: 'sem_pagamento', erro: msg };
-  }
-
-  // 2. Busca codparc do cliente
-  const { data: clienteData, error: cliErr } = await supabase
-    .from('cliente')
-    .select('codparc')
-    .eq('id', pedido.cliente_id)
-    .single();
-
-  if (cliErr || !clienteData) {
-    const msg = `Cliente não encontrado: ${cliErr?.message ?? 'sem dados'}`;
-    await supabase.from('pedido').update({ log_erro_integracao: msg }).eq('id', pedido.id);
-    return { pedido_id: pedido.id, acao: 'erro', erro: msg };
-  }
-
-  if (!clienteData.codparc) {
-    const msg = 'Cliente sem codparc — aguardando integração de clientes';
-    await supabase.from('pedido').update({ log_erro_integracao: msg }).eq('id', pedido.id);
-    return { pedido_id: pedido.id, acao: 'sem_codparc' };
-  }
-
-  // 3. Busca itens do pedido
+  // 1. Busca itens do pedido (com sequencia, ordenados)
   const { data: itens, error: itensErr } = await supabase
     .from('pedido_item')
-    .select('codprod, quantidade, vlr_unitario')
-    .eq('pedido_id', pedido.id);
+    .select('codprod, quantidade, vlr_unitario, sequencia')
+    .eq('pedido_id', pedido.id)
+    .order('sequencia');
 
   if (itensErr) throw new Error(`Falha ao buscar itens do pedido ${pedido.id}: ${itensErr.message}`);
   if (!itens?.length) throw new Error(`Pedido ${pedido.id} sem itens`);
 
-  // 4. Envia ao Sankhya
+  // 2. Envia ao Sankhya
   let nunota: number;
   let resposta: unknown;
 
   try {
-    const result = await criarPedidoSankhya(token, apiBase, pedido, itens, clienteData.codparc);
+    const result = await criarPedidoSankhya(token, apiBase, pedido, itens, codparc);
     nunota   = result.nunota;
     resposta = result.resposta;
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
 
-    // Loga a tentativa falha
     await supabase.from('log_integracao_pedido').insert({
       pedido_id:         pedido.id,
       status:            'erro',
-      payload_enviado:   buildPayloadLog(pedido, itens, clienteData.codparc),
+      payload_enviado:   buildPayloadLog(pedido, itens, codparc),
       resposta_recebida: { erro: msg },
     });
     await supabase.from('pedido').update({ log_erro_integracao: msg }).eq('id', pedido.id);
     return { pedido_id: pedido.id, acao: 'erro', erro: msg };
   }
 
-  // 5. Sucesso — persiste nunota e limpa erro anterior
+  // 3. Sucesso — persiste nunota e limpa erro anterior
   const { error: updErr } = await supabase
     .from('pedido')
     .update({ nunota, status: 'integrado', log_erro_integracao: null })
@@ -285,11 +261,11 @@ async function processarPedido(
 
   if (updErr) throw new Error(`Falha ao atualizar pedido ${pedido.id}: ${updErr.message}`);
 
-  // 6. Log de sucesso
+  // 4. Log de sucesso
   await supabase.from('log_integracao_pedido').insert({
     pedido_id:         pedido.id,
     status:            'sucesso',
-    payload_enviado:   buildPayloadLog(pedido, itens, clienteData.codparc),
+    payload_enviado:   buildPayloadLog(pedido, itens, codparc),
     resposta_recebida: resposta,
   });
 
@@ -302,8 +278,6 @@ function buildPayloadLog(
   itens: PedidoItemRow[],
   codparc: number,
 ): Record<string, unknown> {
-  const metodoPag   = (pedido.metodo_pagamento ?? '').toLowerCase().trim();
-  const codTipVenda = COD_TIP_VENDA[metodoPag];
   return {
     notaModelo:     NOTA_MODELO,
     data:           formatarData(pedido.dt_pedido),
@@ -314,12 +288,21 @@ function buildPayloadLog(
     ...(pedido.vlr_frete && Number(pedido.vlr_frete) > 0
       ? { valorFrete: Number(pedido.vlr_frete) }
       : {}),
-    itens: itens.map(item => ({
-      codigoProduto: item.codprod,
-      quantidade:    Number(item.quantidade),
-      valorUnitario: Number(item.vlr_unitario),
+    itens: itens.map((item, idx) => ({
+      sequencia:          item.sequencia ?? (idx + 1),
+      codigoProduto:      item.codprod,
+      quantidade:         Number(item.quantidade),
+      valorUnitario:      Number(item.vlr_unitario),
+      codigoLocalEstoque: CODIGO_LOCAL_ESTOQUE,
+      controle:           CONTROLE_ITEM,
     })),
-    financeiros: [{ codTipVenda, valor: Number(pedido.vlr_total) }],
+    financeiros: [{
+      sequencia:      1,
+      tipoPagamento:  TIPO_PAGAMENTO,
+      dataVencimento: formatarData(pedido.dt_pedido),
+      valorParcela:   Number(pedido.vlr_total),
+      idTransacao:    `Pedido #${pedido.id} no e-commerce`,
+    }],
   };
 }
 
@@ -328,7 +311,7 @@ function buildPayloadLog(
 // ---------------------------------------------------------------------------
 Deno.serve(async (req: Request) => {
   const url      = new URL(req.url);
-  const pathname = url.pathname.replace(/\/+$/, ''); // remove trailing slash
+  const pathname = url.pathname.replace(/\/+$/, '');
 
   const supabase = createClient(
     Deno.env.get('SUPABASE_URL')!,
@@ -346,7 +329,6 @@ Deno.serve(async (req: Request) => {
     const { pedido_id, motivo } = body ?? {};
     if (!pedido_id) return json({ error: 'pedido_id obrigatório' }, 400);
 
-    // Busca nunota do pedido
     const { data: pedidoData, error: pedidoErr } = await supabase
       .from('pedido')
       .select('nunota, status')
@@ -382,7 +364,8 @@ Deno.serve(async (req: Request) => {
 
   // -------------------------------------------------------------------------
   // Rota principal: POST .../integrar-pedidos
-  // Processa em lote todos os pedidos com status='pago' e nunota IS NULL
+  // Processa em lote todos os pedidos com status='pago' e nunota IS NULL,
+  // cujo cliente já tenha codparc (join !inner exclui os demais)
   // -------------------------------------------------------------------------
   if (req.method !== 'POST') return json({ error: 'Método não permitido' }, 405);
 
@@ -397,16 +380,17 @@ Deno.serve(async (req: Request) => {
   const logId = logRow.id;
 
   try {
-    // Busca pedidos elegíveis: status='pago' e ainda não integrados (nunota IS NULL)
+    // !inner exclui pedidos cujo cliente não tem codparc — codparc vem direto do JOIN
     const { data: pedidosRaw, error: pedErr } = await supabase
       .from('pedido')
-      .select('id, cliente_id, vlr_total, vlr_frete, dt_pedido, metodo_pagamento')
+      .select('id, cliente_id, vlr_total, vlr_frete, dt_pedido, metodo_pagamento, cliente!inner(codparc)')
       .eq('status', 'pago')
-      .is('nunota', null);
+      .is('nunota', null)
+      .not('cliente.codparc', 'is', null);
 
     if (pedErr) throw new Error(`Falha ao buscar pedidos: ${pedErr.message}`);
 
-    const pedidos = pedidosRaw ?? [];
+    const pedidos = (pedidosRaw ?? []) as PedidoRow[];
     const total   = pedidos.length;
 
     if (total === 0) {
@@ -431,22 +415,18 @@ Deno.serve(async (req: Request) => {
 
       const lote = pedidos.slice(i, i + BATCH_SIZE);
 
-      // Processa em série dentro do lote (pedidos podem depender de codparc
-      // que esteja sendo reconciliado na mesma execução)
       for (const p of lote) {
         if (Date.now() - startTime > DEADLINE_MS) { deadlineAtingido = true; break; }
-        const resultado = await processarPedido(token, apiBase, supabase, p as PedidoRow);
+        const resultado = await processarPedido(token, apiBase, supabase, p, p.cliente.codparc);
         resultados.push(resultado);
       }
 
       if (deadlineAtingido) break;
     }
 
-    const integrados    = resultados.filter(r => r.acao === 'integrado').length;
-    const semCodparc    = resultados.filter(r => r.acao === 'sem_codparc').length;
-    const semPagamento  = resultados.filter(r => r.acao === 'sem_pagamento').length;
-    const erros         = resultados.filter(r => r.acao === 'erro');
-    const totalOk       = integrados;
+    const integrados = resultados.filter(r => r.acao === 'integrado').length;
+    const erros      = resultados.filter(r => r.acao === 'erro');
+    const totalOk    = integrados;
 
     const statusFinal = erros.length > 0 && totalOk === 0
       ? 'erro'
@@ -469,8 +449,6 @@ Deno.serve(async (req: Request) => {
       status:          statusFinal,
       total_elegiveis: total,
       integrados,
-      sem_codparc:     semCodparc,
-      sem_pagamento:   semPagamento,
       erros:           erros.length,
       detalhes_erros:  erros.map(e => ({ pedido_id: e.pedido_id, erro: e.erro })),
       tempo_ms:        Date.now() - startTime,

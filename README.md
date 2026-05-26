@@ -69,10 +69,10 @@ Para o mapeamento de campos Sankhya ↔ Supabase, consulte [`docs/MAPPING.md`](d
 | `sync-precos` | false | pg_cron | Sincroniza preços da tabela 201 via REST por produto |
 | `sync-especificacoes` | false | pg_cron | Sincroniza especificações customizadas (AD_PROESP) |
 | `sync-bairros` | false | pg_cron | Sincroniza tabelas auxiliares `cidade` (TGFCID) e `bairro` (TGFBAI) — diário às 00:30 UTC |
-| `sync-parceiros` | false | pg_cron | Sincroniza snapshot de parceiros (TGFPAR → `public.parceiro`) para consulta local de CPF |
-| `integrar-clientes` | false | pg_cron | Reconcilia/cria clientes PF no Sankhya (TGFPAR) |
-| `integrar-pedidos` | false | Manual | Envia pedidos pagos ao Sankhya (TGFCAB+TGFITE), grava `nunota` — sem cron ativo (fase de desenvolvimento) |
-| `util-update-cidade-codibge` | false | Manual | Utilitário — enriquece `cidade.codibge` com código IBGE para uso no payload de `integrar-clientes` |
+| `sync-parceiros` | false | pg_cron | Sincroniza snapshot de parceiros (TGFPAR → `public.parceiro`) para lookup local de CPF em `integrar-clientes` |
+| `integrar-clientes` | false | pg_cron | Reconcilia/cria clientes PF no Sankhya (TGFPAR) — exige `codcid` no endereço e CPF com 11 dígitos |
+| `integrar-pedidos` | false | Manual | Envia pedidos pagos ao Sankhya (TGFCAB+TGFITE), grava `nunota` — **implantação planejada no próximo sprint** (ver [`docs/SPRINT_INTEGRAR_PEDIDOS.md`](docs/SPRINT_INTEGRAR_PEDIDOS.md)) |
+| `util-update-cidade-codibge` | false | Manual | Utilitário pontual — enriquece `cidade.codibge` via API IBGE; executar somente quando novos municípios sem `codibge` forem adicionados |
 | `test-sankhya-auth` | true | Manual | Valida secrets e conectividade OAuth com a API Sankhya; retorna preview mascarado dos valores |
 
 Todas as funções de sync registram execução em `log_sincronizacao`. O código-fonte está em `supabase/functions/`.

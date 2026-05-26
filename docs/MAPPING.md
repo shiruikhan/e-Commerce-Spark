@@ -311,41 +311,46 @@ Authorization: Bearer {access_token}
 | Método | Endpoint | Finalidade |
 |---|---|---|
 | `POST` | `/v1/parceiros/clientes` | Cria novo parceiro na TGFPAR |
-| `loadRecords` | rootEntity: `Parceiro` (TGFPAR) | Verifica se CPF já existe antes de criar |
+
+> **Lookup de CPF:** feito localmente na tabela `public.parceiro` (snapshot de TGFPAR sincronizado por `sync-parceiros`), sem chamada à API do Sankhya em tempo real. Busca por `cgc_cpf` com e sem máscara (ex: `12345678901` e `123.456.789-01`).
 
 ### Critérios de elegibilidade
 - `codparc IS NULL` — ainda não integrado ao Sankhya
+- `integracao_status IS NULL OR integracao_status = 'pendente'`
 - CPF com 11 dígitos (somente Pessoa Física)
 
 ### Mapeamento Supabase → Sankhya (POST body)
 
 ```json
 {
-  "contatos": [{
-    "tipo":           "PF",
-    "cnpjCpf":        "cliente.cpf_cnpj (só dígitos)",
-    "nome":           "cliente.nome",
-    "email":          "cliente.email",
-    "telefoneDdd":    "cliente.telefone (2 primeiros dígitos)",
-    "telefoneNumero": "cliente.telefone (demais dígitos)",
-    "endereco": {
-      "cep":         "endereco.cep (só dígitos)",
-      "logradouro":  "endereco.logradouro",
-      "numero":      "endereco.numero",
-      "complemento": "endereco.complemento",
-      "bairro":      "endereco.bairro",
-      "cidade":      "endereco.cidade",
-      "uf":          "endereco.uf"
-    }
-  }]
+  "tipo":           "PF",
+  "cnpjCpf":        "cliente.cpf_cnpj (só dígitos)",
+  "ieRg":           "ISENTO",
+  "nome":           "cliente.nome (UPPERCASE)",
+  "email":          "cliente.email (omitido se null)",
+  "telefoneDdd":    "cliente.telefone (2 primeiros dígitos, omitido se null)",
+  "telefoneNumero": "cliente.telefone (demais dígitos, omitido se null)",
+  "endereco": {
+    "logradouro":  "endereco.logradouro",
+    "numero":      "endereco.numero",
+    "complemento": "endereco.complemento (omitido se null)",
+    "bairro":      "endereco.bairro",
+    "cidade":      "cidade.nomecid (via JOIN em endereco.codcid)",
+    "uf":          "endereco.uf",
+    "cep":         "endereco.cep (só dígitos)",
+    "codigolbge":  "cidade.codibge (via JOIN em endereco.codcid)"
+  }
 }
 ```
+
+**Campos obrigatórios do endereço** — a ausência de qualquer um resulta em `acao: 'endereco_incompleto'` e o cliente não é enviado:
+`logradouro`, `numero`, `bairro`, `uf`, `cep`, `codcid` (resolução de `nomecid`/`codibge`), `codibge`.
 
 ### Response do POST e atualização do Supabase
 
 | Campo Response | Campo Supabase | Observação |
 |---|---|---|
-| `codigoCliente` | `cliente.codparc` | CODPARC gerado pelo Sankhya — salvo após criação |
+| `codigoCliente` / `codigoParceiro` / `codParc` / `codparc` / `id` | `cliente.codparc` | CODPARC gerado pelo Sankhya — a função aceita qualquer um dos cinco nomes |
 
 ### Verificação de duplicata e fluxo por cliente
 
@@ -360,13 +365,18 @@ Antes de qualquer criação, a função consulta TGFPAR pelo `CGC_CPF` (com e se
 ### Fluxo completo
 
 ```
-1. Busca TODOS os clientes PF com codparc IS NULL (LEFT JOIN em pedido)
-2. Para cada cliente (lotes de 5 em paralelo):
-   a. loadRecords TGFPAR → busca por CPF (com e sem máscara)
-   b. Se encontrado → reconcilia codparc (evita duplicidade no ERP)
-   c. Se não encontrado e tem pedido → POST /v1/parceiros/clientes
-   d. Se não encontrado e sem pedido → ignora
-3. Loga resultado em log_sincronizacao (entidade='cliente')
+1. Busca clientes PF com (codparc IS NULL) E (integracao_status IS NULL OU 'pendente')
+   - JOIN com pedido (para saber se tem histórico de compra)
+   - JOIN com endereco + cidade (para resolver codcid, nomecid, codibge)
+2. Filtra somente CPF com 11 dígitos (PF)
+3. Para cada cliente (lotes de 5, serial por cliente dentro do lote):
+   a. Valida campos obrigatórios do endereço — se incompleto: marca null/erro, avança
+   b. Consulta tabela local `parceiro` → busca por CGC_CPF (com e sem máscara)
+   c. Se encontrado → reconcilia (salva codparc, status='integrado')
+   d. Se não encontrado e SEM pedido → ignora
+   e. Se não encontrado e COM pedido → POST /v1/parceiros/clientes → salva codparc
+4. Registra execução em log_sincronizacao (entidade='cliente')
+5. Guard de deadline: 130s — ciclos parciais registrados como status='parcial'
 ```
 
 ### Referência ao script anterior (TGSPAR.py)
@@ -382,21 +392,31 @@ O script Python anterior (`TGSPAR.py`) enviava dados para uma tabela intermediá
 
 > **Direção:** Supabase → Sankhya (outbound). Pedidos realizados no e-commerce são enviados ao ERP para faturamento.
 
-### Configurações fixas (regras obrigatórias do projeto)
+### Configurações fixas (confirmadas em 25/05/2026)
 
 | Constante | Valor | Descrição |
 |---|---|---|
-| `notaModelo` | `1006` | TOP (Tipo de Operação) para pedidos do e-commerce |
+| `notaModelo` | `793370` | Código do Modelo de Nota no Sankhya Om — pré-define CODEMP, TOP, CFOP. Não é código de TOP. |
 | `codigoVendedor` | `6` | Vendedor padrão para todos os pedidos do site |
-| `codigoEmpresa` | `2` | CODEMP Sankhya |
+| `codigoLocalEstoque` | `109` | CODLOCAL do estoque de saída (obrigatório em cada item da TGFITE) |
+| `controle` | `' '` (espaço) | Campo interno Sankhya; fixo para todos os produtos do catálogo e-commerce |
+| `tipoPagamento` | `53` | CODTIPTIT — recebimento único via intermediário; fixo para todos os métodos de pagamento |
 
-### Mapeamento metodo_pagamento → codTipVenda
+> `codigoEmpresa` removido do payload — a empresa é definida pelo `notaModelo`. Enviá-la separadamente pode gerar conflito.
 
-| `pedido.metodo_pagamento` | `codTipVenda` Sankhya |
-|---|---|
-| `boleto` | `87` |
-| `cartao` / `cartão` | `86` |
-| `pix` | `140` |
+### Campo `financeiros` — obrigatório
+
+Array de objetos de dados financeiros. Para o e-commerce, sempre 1 parcela (recebimento é único via intermediário):
+
+| Campo | Valor | Descrição |
+|---|---|---|
+| `sequencia` | `1` | Parcela única — sem parcelamento no e-commerce |
+| `tipoPagamento` | `53` | CODTIPTIT fixo para todos os métodos (PIX, boleto, cartão) |
+| `dataVencimento` | `DD/MM/AAAA` de `pedido.dt_pedido` | Mesma data do pedido |
+| `valorParcela` | `pedido.vlr_total` | Valor total do pedido |
+| `idTransacao` | `"Pedido #<id> no e-commerce"` | Identificação fixa do pedido |
+
+> O mapeamento anterior `metodo_pagamento → codTipVenda` (87/86/140) era incorreto e foi descartado. O tipo de título `53` cobre todos os meios de pagamento do e-commerce.
 
 ### Endpoints utilizados
 
@@ -415,7 +435,7 @@ O script Python anterior (`TGSPAR.py`) enviava dados para uma tabela intermediá
 
 ```json
 {
-  "notaModelo":     1006,
+  "notaModelo":     793370,
   "data":           "DD/MM/AAAA (de pedido.dt_pedido)",
   "hora":           "HH:MM:SS  (de pedido.dt_pedido)",
   "codigoVendedor": 6,
@@ -423,13 +443,19 @@ O script Python anterior (`TGSPAR.py`) enviava dados para uma tabela intermediá
   "valorTotal":     "pedido.vlr_total",
   "valorFrete":     "pedido.vlr_frete (omitido se nulo ou zero)",
   "itens": [{
-    "codigoProduto": "pedido_item.codprod",
-    "quantidade":    "pedido_item.quantidade",
-    "valorUnitario": "pedido_item.vlr_unitario"
+    "sequencia":          "pedido_item.sequencia (1-based, persistido no banco)",
+    "codigoProduto":      "pedido_item.codprod",
+    "quantidade":         "pedido_item.quantidade",
+    "valorUnitario":      "pedido_item.vlr_unitario",
+    "codigoLocalEstoque": 109,
+    "controle":           " "
   }],
   "financeiros": [{
-    "codTipVenda": "<mapeado de metodo_pagamento>",
-    "valor":       "pedido.vlr_total"
+    "sequencia":      1,
+    "tipoPagamento":  53,
+    "dataVencimento": "DD/MM/AAAA (de pedido.dt_pedido)",
+    "valorParcela":   "pedido.vlr_total",
+    "idTransacao":    "Pedido #<id> no e-commerce"
   }]
 }
 ```
@@ -517,7 +543,7 @@ Body: { "pedido_id": 123, "motivo": "Cancelamento solicitado" }
 | `sync-produtos-hourly` | `0 * * * *` | Edge Function sync-produtos |
 | `sync-estoque-30min` | `*/30 * * * *` | Edge Function sync-estoque |
 | `integrar-clientes-30min` | `*/30 * * * *` | Edge Function integrar-clientes |
-| `integrar-pedidos` | — | Edge Function integrar-pedidos — **sem cron** (disparo manual; fase de desenvolvimento) |
+| `integrar-pedidos-30min` | `5,35 * * * *` | Edge Function integrar-pedidos — roda 5 min após `integrar-clientes` (`:05` e `:35`) para garantir que `codparc` já foi resolvido |
 | `sync-precos-daily` | `0 1 * * *` | Edge Function sync-precos |
 | `sync-especificacoes-daily` | `0 2 * * *` | Edge Function sync-especificacoes |
 | `sync-categorias-daily` | `0 3 * * *` | Edge Function sync-categorias |
